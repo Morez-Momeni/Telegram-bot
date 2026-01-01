@@ -434,7 +434,7 @@ async def main():
     restore_jobs(ptb_app)
 
     # set telegram webhook (HTTPS is required) :contentReference[oaicite:6]{index=6}
-    await ptb_app.bot.set_webhook(url=f"{PUBLIC_URL}/telegram", allowed_updates=Update.ALL_TYPES)
+    #await ptb_app.bot.set_webhook(url=f"{PUBLIC_URL}/telegram", allowed_updates=Update.ALL_TYPES)
 
     # starlette server
     starlette_app = Starlette(
@@ -458,3 +458,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
