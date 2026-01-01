@@ -5,7 +5,9 @@ from telegram.ext import (
     Application,
     ApplicationBuilder,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 from starlette.applications import Starlette
@@ -14,19 +16,22 @@ from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 import uvicorn
 
-# ===== ENV =====
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# ===== Telegram Handlers =====
+# ---------------- Telegram handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ ربات الان کاملاً زنده‌ست و جواب می‌ده 🎉")
+    await update.message.reply_text("✅ ربات زنده‌ست و جواب می‌ده")
 
-# ===== Build Telegram Application =====
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"echo: {update.message.text}")
+
+# ---------------- Build PTB application ----------------
 tg_app: Application = ApplicationBuilder().token(TOKEN).build()
 tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# ===== Webhook endpoint =====
+# ---------------- Webhook endpoint ----------------
 async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, tg_app.bot)
@@ -36,18 +41,18 @@ async def telegram_webhook(request: Request):
 async def ping(_: Request):
     return PlainTextResponse("pong")
 
-# ===== Starlette app =====
+# ---------------- Starlette app ----------------
 web_app = Starlette(
     routes=[
         Route("/telegram", telegram_webhook, methods=["POST"]),
-        Route("/ping", ping, methods=["GET"]),
+        Route("/ping", ping),
     ]
 )
 
-# ===== Startup =====
+# ---------------- Main ----------------
 if __name__ == "__main__":
     if not TOKEN:
-        raise RuntimeError("TOKEN is not set")
+        raise RuntimeError("TOKEN not set")
 
     async def startup():
         await tg_app.initialize()
