@@ -1,6 +1,7 @@
 import os
 import random
 import sqlite3
+import asyncio
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -9,6 +10,7 @@ from telegram import (
 )
 from telegram.constants import ChatAction
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -16,21 +18,31 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from backboard import BackboardClient
 
-# ================== ENV ==================
+from backboard import BackboardClient
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import Response, PlainTextResponse
+from starlette.routing import Route
+import uvicorn
+
+
+# ================= ENV =================
 TOKEN = os.getenv("TOKEN")
 BACKBOARD_API_KEY = os.getenv("BACKBOARD_API_KEY")
 PUBLIC_URL = os.getenv("PUBLIC_URL")
+PORT = int(os.getenv("PORT", "10000"))
 DB_NAME = os.getenv("DB_PATH", "bot.db")
 
 BB_LLM_PROVIDER = os.getenv("BB_LLM_PROVIDER", "google")
 BB_MODEL_NAME = os.getenv("BB_MODEL_NAME", "gemini-2.5-pro")
 
-# ================== CONFIG ==================
-DEFAULT_INTERVAL = 3600  # 1 hour
 
-# ================== MESSAGES ==================
+# ================= CONFIG =================
+DEFAULT_INTERVAL = 3600
+
+
+# ================= MESSAGES =================
 MESSAGES = [
     "🌿 با خودت مهربون باش، تو داری بهترینِ خودت رو می‌دی.",
     "💛 امروز فقط دوام آوردن هم موفقیته.",
@@ -43,7 +55,8 @@ MESSAGES = [
     "🌸 تو هنوز در مسیرت هستی، نه عقب.",
 ]
 
-# ================== KEYBOARDS ==================
+
+# ================= KEYBOARDS =================
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["▶️ Start", "⏹ Stop"],
@@ -73,9 +86,11 @@ interval_keyboard = InlineKeyboardMarkup(
     ]
 )
 
-# ================== DATABASE ==================
+
+# ================= DATABASE =================
 def db():
     return sqlite3.connect(DB_NAME)
+
 
 def init_db():
     con = db()
@@ -91,6 +106,7 @@ def init_db():
     """)
     con.commit()
     con.close()
+
 
 def get_chat(chat_id):
     con = db()
@@ -109,6 +125,7 @@ def get_chat(chat_id):
         "thread": row[3],
     }
 
+
 def update_chat(chat_id, **kwargs):
     con = db()
     cur = con.cursor()
@@ -117,15 +134,18 @@ def update_chat(chat_id, **kwargs):
     con.commit()
     con.close()
 
-# ================== REMINDER ==================
+
+# ================= JOB QUEUE =================
 def jobs(app):
     return app.bot_data.setdefault("jobs", {})
 
-async def send_reminder(context):
+
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=context.job.chat_id,
         text=random.choice(MESSAGES),
     )
+
 
 def start_job(context, chat_id, interval):
     jm = jobs(context.application)
@@ -140,17 +160,20 @@ def start_job(context, chat_id, interval):
     )
     jm[chat_id] = job
 
+
 def stop_job(context, chat_id):
     jm = jobs(context.application)
     if chat_id in jm:
         jm[chat_id].schedule_removal()
         jm.pop(chat_id)
 
-# ================== BACKBOARD CHAT (ASYNC) ==================
+
+# ================= BACKBOARD CHAT =================
 def bb_client(app):
     if "bb" not in app.bot_data:
         app.bot_data["bb"] = BackboardClient(api_key=BACKBOARD_API_KEY)
     return app.bot_data["bb"]
+
 
 async def get_thread(app, chat_id):
     chat = get_chat(chat_id)
@@ -166,12 +189,13 @@ async def get_thread(app, chat_id):
     update_chat(chat_id, bb_thread_id=thread.thread_id)
     return thread.thread_id
 
+
 async def chat_reply(app, chat_id, text):
     if not BACKBOARD_API_KEY:
         return "چت‌بات فعلاً غیرفعاله."
 
-    thread_id = await get_thread(app, chat_id)
     client = bb_client(app)
+    thread_id = await get_thread(app, chat_id)
 
     try:
         res = await client.add_message(
@@ -184,9 +208,10 @@ async def chat_reply(app, chat_id, text):
         return res.latest_message.content.strip()[:3500]
     except Exception as e:
         print("Backboard error:", e)
-        return "الان نتونستم جواب بدم، یه کم بعد دوباره امتحان کن."
+        return "الان نتونستم جواب بدم، بعداً دوباره امتحان کن."
 
-# ================== HANDLERS ==================
+
+# ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat = get_chat(chat_id)
@@ -203,11 +228,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard,
     )
 
+
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     stop_job(context, chat_id)
     update_chat(chat_id, is_active=0)
     await update.message.reply_text("⛔ متوقف شد.", reply_markup=main_keyboard)
+
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = get_chat(update.effective_chat.id)
@@ -219,8 +246,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard,
     )
 
+
 async def show_intervals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏱ فاصله زمانی رو انتخاب کن:", reply_markup=interval_keyboard)
+
 
 async def interval_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -238,13 +267,16 @@ async def interval_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard,
     )
 
+
 async def chat_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_chat(update.effective_chat.id, chat_enabled=1)
     await update.message.reply_text("💬 چت‌بات روشن شد", reply_markup=main_keyboard)
 
+
 async def chat_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_chat(update.effective_chat.id, chat_enabled=0)
     await update.message.reply_text("🚫 چت‌بات خاموش شد", reply_markup=main_keyboard)
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -280,9 +312,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = await chat_reply(context.application, chat_id, text)
     await update.message.reply_text(reply)
 
-# ================== MAIN ==================
-def main():
+
+# ================= WEBHOOK =================
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, request.app.state.app.bot)
+    await request.app.state.app.process_update(update)
+    return Response("ok")
+
+
+async def ping(_: Request):
+    return PlainTextResponse("pong")
+
+
+# ================= MAIN =================
+async def main():
+    if not TOKEN or not PUBLIC_URL:
+        raise RuntimeError("Missing env vars")
+
     init_db()
+
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -295,8 +344,21 @@ def main():
     app.add_handler(CallbackQueryHandler(interval_cb, pattern=r"^int_\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Bot is running...")
-    app.run_polling()
+    await app.initialize()
+    await app.start()
+
+    starlette = Starlette(
+        routes=[
+            Route("/telegram", telegram_webhook, methods=["POST"]),
+            Route("/ping", ping),
+        ]
+    )
+    starlette.state.app = app
+
+    config = uvicorn.Config(starlette, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
