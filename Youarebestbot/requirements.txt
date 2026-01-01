@@ -1,4 +1,7 @@
-python-telegram-bot[job-queue]==20.*
+python-telegram-bot[job-queue]==20.7
 backboard-sdk==1.4.4
+httpx==0.27.0
 starlette==0.27.*
 uvicorn==0.23.*
+
+
