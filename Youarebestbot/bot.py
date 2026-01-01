@@ -1,97 +1,62 @@
 import os
-import random
-import sqlite3
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.constants import ChatAction
+import asyncio
+from telegram import Update
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
-    filters,
 )
 
-from backboard import BackboardClient
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import Response, PlainTextResponse
+from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 import uvicorn
-import asyncio
 
-# ---------- ENV ----------
+# ===== ENV =====
 TOKEN = os.getenv("TOKEN")
-BACKBOARD_API_KEY = os.getenv("BACKBOARD_API_KEY")
-PUBLIC_URL = os.getenv("PUBLIC_URL")
 PORT = int(os.getenv("PORT", "10000"))
-DB_NAME = os.getenv("DB_PATH", "bot.db")
 
-BB_LLM_PROVIDER = os.getenv("BB_LLM_PROVIDER", "google")
-BB_MODEL_NAME = os.getenv("BB_MODEL_NAME", "gemini-2.5-pro")
-
-# ---------- DB ----------
-def db():
-    return sqlite3.connect(DB_NAME)
-
-def init_db():
-    con = db()
-    cur = con.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS chats (
-            chat_id INTEGER PRIMARY KEY,
-            interval INTEGER DEFAULT 3600,
-            is_active INTEGER DEFAULT 0,
-            chat_enabled INTEGER DEFAULT 1,
-            bb_thread_id TEXT
-        )
-    """)
-    con.commit()
-    con.close()
-
-# ---------- Telegram App ----------
-application = ApplicationBuilder().token(TOKEN).build()
-
-# ---------- Simple Handlers (برای تست سالم بودن webhook) ----------
+# ===== Telegram Handlers =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ ربات زنده‌ست و کار می‌کنه 🎉")
+    await update.message.reply_text("✅ ربات الان کاملاً زنده‌ست و جواب می‌ده 🎉")
 
-application.add_handler(CommandHandler("start", start))
+# ===== Build Telegram Application =====
+tg_app: Application = ApplicationBuilder().token(TOKEN).build()
+tg_app.add_handler(CommandHandler("start", start))
 
-# ---------- Webhook ----------
+# ===== Webhook endpoint =====
 async def telegram_webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
+    update = Update.de_json(data, tg_app.bot)
+    await tg_app.process_update(update)
     return Response("ok")
 
 async def ping(_: Request):
     return PlainTextResponse("pong")
 
-# ---------- Starlette App (PORT BINDING) ----------
-starlette_app = Starlette(
+# ===== Starlette app =====
+web_app = Starlette(
     routes=[
         Route("/telegram", telegram_webhook, methods=["POST"]),
         Route("/ping", ping, methods=["GET"]),
     ]
 )
 
-# ---------- Main ----------
+# ===== Startup =====
 if __name__ == "__main__":
-    if not TOKEN or not PUBLIC_URL:
-        raise RuntimeError("Missing TOKEN or PUBLIC_URL")
-
-    init_db()
+    if not TOKEN:
+        raise RuntimeError("TOKEN is not set")
 
     async def startup():
-        await application.initialize()
-        await application.start()
+        await tg_app.initialize()
+        await tg_app.start()
 
     asyncio.get_event_loop().run_until_complete(startup())
 
-    # ⬅⬅⬅ این خط کلیدی Render است
     uvicorn.run(
-        starlette_app,
+        web_app,
         host="0.0.0.0",
         port=PORT,
         log_level="info",
