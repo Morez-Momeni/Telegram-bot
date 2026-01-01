@@ -36,7 +36,7 @@ BB_LLM_PROVIDER = os.getenv("BB_LLM_PROVIDER", "google")
 BB_MODEL_NAME = os.getenv("BB_MODEL_NAME", "gemini-2.5-pro")
 
 # ================= CONFIG =================
-DEFAULT_INTERVAL = 3600
+DEFAULT_INTERVAL = 1800  # 30 minutes (safe default)
 
 # ================= MESSAGES =================
 MESSAGES = [
@@ -63,21 +63,12 @@ main_keyboard = ReplyKeyboardMarkup(
 
 interval_keyboard = InlineKeyboardMarkup(
     [
-        [
-            InlineKeyboardButton("1 دقیقه", callback_data="int_60"),
-            InlineKeyboardButton("5 دقیقه", callback_data="int_300"),
-        ],
-        [
-            InlineKeyboardButton("30 دقیقه", callback_data="int_1800"),
-            InlineKeyboardButton("1 ساعت", callback_data="int_3600"),
-        ],
-        [
-            InlineKeyboardButton("2 ساعت", callback_data="int_7200"),
-            InlineKeyboardButton("3 ساعت", callback_data="int_10800"),
-        ],
-        [
-            InlineKeyboardButton("4 ساعت", callback_data="int_14400"),
-        ],
+        [InlineKeyboardButton("10 دقیقه", callback_data="int_600")],
+        [InlineKeyboardButton("30 دقیقه", callback_data="int_1800")],
+        [InlineKeyboardButton("1 ساعت", callback_data="int_3600")],
+        [InlineKeyboardButton("2 ساعت", callback_data="int_7200")],
+        [InlineKeyboardButton("3 ساعت", callback_data="int_10800")],
+        [InlineKeyboardButton("4 ساعت", callback_data="int_14400")],
     ]
 )
 
@@ -91,7 +82,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             chat_id INTEGER PRIMARY KEY,
-            interval INTEGER DEFAULT 3600,
+            interval INTEGER DEFAULT 1800,
             is_active INTEGER DEFAULT 0,
             chat_enabled INTEGER DEFAULT 1,
             bb_thread_id TEXT
@@ -171,8 +162,10 @@ async def get_thread(app, chat_id):
         description="Persian friendly assistant",
     )
     thread = await client.create_thread(assistant.assistant_id)
-    update_chat(chat_id, bb_thread_id=thread.thread_id)
-    return thread.thread_id
+
+    # 🔥 FIX: UUID -> str
+    update_chat(chat_id, bb_thread_id=str(thread.thread_id))
+    return str(thread.thread_id)
 
 async def chat_reply(app, chat_id, text):
     if not BACKBOARD_API_KEY:
@@ -205,6 +198,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     start_job(context, chat_id, chat["interval"])
     update_chat(chat_id, is_active=1)
+
+    # پیام فوری
+    await context.bot.send_message(chat_id=chat_id, text=random.choice(MESSAGES))
 
     await update.message.reply_text(
         f"✅ فعال شد!\nهر {chat['interval']//60} دقیقه پیام می‌دم 💛",
@@ -240,6 +236,9 @@ async def interval_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = get_chat(chat_id)
     if chat["is_active"]:
         start_job(context, chat_id, seconds)
+
+    # پیام فوری
+    await context.bot.send_message(chat_id=chat_id, text=random.choice(MESSAGES))
 
     await q.message.reply_text(
         f"✅ تنظیم شد روی {seconds//60} دقیقه",
