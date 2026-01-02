@@ -28,18 +28,18 @@ from starlette.responses import Response, PlainTextResponse
 from starlette.routing import Route
 import uvicorn
 
-# ================= ENV =================
+
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()  # پیشنهاد: gemini-2.5-flash
 
-# ================= LOG =================
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("multi-bot")
 
-# ================= UI =================
+
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["🚗 قیمت خودرو", "💵 قیمت ارز"],
@@ -82,7 +82,7 @@ HELP_TEXT = (
     "• خروج از چت: «🛑 پایان چت»\n"
 )
 
-# ================= API ENDPOINTS =================
+
 CAR_ALL_URL = "https://car.api-sina-free.workers.dev/cars?type=all"
 
 CODEBAZAN_ARZ_URL = "https://api.codebazan.ir/arz/?type=arz"
@@ -105,7 +105,6 @@ DIGIKALA_CATS = {
 # Gemini REST
 GEMINI_URL = lambda model: f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# ================= HTTP CLIENT =================
 _http: httpx.AsyncClient | None = None
 
 def _http_client() -> httpx.AsyncClient:
@@ -184,7 +183,6 @@ def to_int_from_price_str(s: str) -> int | None:
     s2 = re.sub(r"[^\d]", "", str(s))
     return int(s2) if s2.isdigit() else None
 
-# ================= JALALI =================
 def gregorian_to_jalali(gy, gm, gd):
     g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
     if gy > 1600:
@@ -223,7 +221,6 @@ def gregorian_to_jalali(gy, gm, gd):
 
     return jy, jm, jd
 
-# ================= GEMINI CHAT =================
 def gemini_headers():
     if not GEMINI_API_KEY:
         return None
@@ -284,7 +281,6 @@ async def gemini_chat(history: list[dict], user_text: str) -> str:
     txt = gemini_extract_text(data)
     return txt or "❌ پاسخی از Gemini نگرفتم. دوباره بفرست."
 
-# ================= FEATURES =================
 async def feature_fx() -> str:
     data = await http_get_json(CODEBAZAN_ARZ_URL)
     items = data.get("Result") if isinstance(data, dict) else None
@@ -389,7 +385,6 @@ async def feature_today_events() -> str:
         lines.append("\n(مناسبتی ثبت نشده)")
     return "\n".join(lines).strip()
 
-# ================= DIGIKALA =================
 def dk_extract_products(payload: dict) -> list[dict]:
     for path in (["data", "products"], ["data", "search", "products"], ["data", "items"], ["products"]):
         v = deep_get(payload, path, None)
@@ -456,7 +451,6 @@ async def dk_category(slug: str, title_fa: str, page: int = 1):
     markup = InlineKeyboardMarkup([nav])
     return "\n".join(lines).strip(), markup
 
-# ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("سلام 👋 از دکمه‌ها استفاده کن 👇", reply_markup=main_keyboard)
@@ -489,7 +483,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ چت بسته شد.", reply_markup=main_keyboard)
         return
 
-    # ===== Chat mode =====
     if context.user_data.get("chat_mode") is True:
         await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
         history = context.user_data.get("gemini_history") or []
@@ -507,17 +500,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
     try:
-        # چت‌بات
         if text == "💬 چت‌بات":
             context.user_data["chat_mode"] = True
             context.user_data["gemini_history"] = []
             await update.message.reply_text(
-                "💬 چت‌بات Gemini فعال شد.\nبرای خروج: «🛑 پایان چت»",
+                "💬 چت‌بات Gemini فعال شد.\nبرای خروج: « پایان چت»",
                 reply_markup=chat_keyboard,
             )
             return
 
-        # Digikala menu
+       
         if text == "🛒 دیجی‌کالا":
             context.user_data["mode"] = "digikala"
             context.user_data.pop("awaiting", None)
@@ -544,7 +536,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg, reply_markup=markup or digikala_menu_keyboard)
             return
 
-        # Main features
         if text == "💵 قیمت ارز":
             out = await feature_fx()
         elif text == "🥇 طلا و سکه":
@@ -600,7 +591,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Callback error")
         await q.message.reply_text("❌ خطا در صفحه‌بندی.", reply_markup=main_keyboard)
 
-# ================= TELEGRAM WEBHOOK =================
 application = ApplicationBuilder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
@@ -642,3 +632,4 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("TOKEN env var is missing")
     uvicorn.run(starlette_app, host="0.0.0.0", port=PORT, log_level="info")
+
