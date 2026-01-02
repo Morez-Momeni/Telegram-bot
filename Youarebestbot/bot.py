@@ -2,6 +2,7 @@ import os
 import random
 import sqlite3
 import asyncio
+
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -36,7 +37,7 @@ BB_LLM_PROVIDER = os.getenv("BB_LLM_PROVIDER", "google")
 BB_MODEL_NAME = os.getenv("BB_MODEL_NAME", "gemini-2.5-pro")
 
 # ================= CONFIG =================
-DEFAULT_INTERVAL = 1800  # 30 minutes (safe default)
+DEFAULT_INTERVAL = 1800  # 30 minutes (safe)
 
 # ================= MESSAGES =================
 MESSAGES = [
@@ -94,7 +95,10 @@ def init_db():
 def get_chat(chat_id):
     con = db()
     cur = con.cursor()
-    cur.execute("SELECT interval, is_active, chat_enabled, bb_thread_id FROM chats WHERE chat_id=?", (chat_id,))
+    cur.execute(
+        "SELECT interval, is_active, chat_enabled, bb_thread_id FROM chats WHERE chat_id=?",
+        (chat_id,),
+    )
     row = cur.fetchone()
     if not row:
         cur.execute("INSERT INTO chats (chat_id) VALUES (?)", (chat_id,))
@@ -163,7 +167,7 @@ async def get_thread(app, chat_id):
     )
     thread = await client.create_thread(assistant.assistant_id)
 
-    # 🔥 FIX: UUID -> str
+    # UUID -> str (FIX)
     update_chat(chat_id, bb_thread_id=str(thread.thread_id))
     return str(thread.thread_id)
 
@@ -182,7 +186,17 @@ async def chat_reply(app, chat_id, text):
             model_name=BB_MODEL_NAME,
             stream=False,
         )
-        return res.latest_message.content.strip()[:3500]
+
+        # Safe parse
+        if hasattr(res, "latest_message") and res.latest_message:
+            content = res.latest_message.content
+        elif isinstance(res, dict) and "message" in res:
+            content = res["message"]
+        else:
+            content = "پاسخی دریافت نشد."
+
+        return str(content).strip()[:3500]
+
     except Exception as e:
         print("Backboard error:", e)
         return "الان نتونستم جواب بدم، بعداً دوباره امتحان کن."
@@ -224,11 +238,15 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_intervals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏱ فاصله زمانی رو انتخاب کن:", reply_markup=interval_keyboard)
+    await update.message.reply_text(
+        "⏱ فاصله زمانی رو انتخاب کن:",
+        reply_markup=interval_keyboard,
+    )
 
 async def interval_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
     seconds = int(q.data.split("_")[1])
     chat_id = q.message.chat_id
 
