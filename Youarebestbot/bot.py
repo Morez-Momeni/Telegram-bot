@@ -246,7 +246,6 @@ async def gemini_chat(history: list[dict], user_text: str) -> str:
     if not GEMINI_API_KEY:
         return "❌ GEMINI_API_KEY تنظیم نشده. تو Render → Environment بذارش."
 
-    # تاریخچه رو کوتاه نگه می‌داریم (تا هزینه/توکن نترکه)
     history = (history or [])[-12:]
 
     contents = history + [{"role": "user", "parts": [{"text": user_text}]}]
@@ -632,4 +631,5 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("TOKEN env var is missing")
     uvicorn.run(starlette_app, host="0.0.0.0", port=PORT, log_level="info")
+
 
