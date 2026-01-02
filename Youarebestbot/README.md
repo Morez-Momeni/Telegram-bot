@@ -49,4 +49,8 @@ A clean, multi-purpose Telegram bot (Persian-first) featuring **prices, holidays
 ## Try it
 **Telegram Bot:** https://t.me/youarebestbot
 
+---
+
+💚 Thanks for checking out **YouAreBestBot** — if you find it useful, feel free to star the repo and share it!
+
 
