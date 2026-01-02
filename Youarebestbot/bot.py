@@ -1,11 +1,14 @@
 import os
 import re
 import json
-import time
-import httpx
-import jdatetime
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
-from telegram import Update
+import httpx
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -24,436 +27,391 @@ import uvicorn
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# ================= API ENDPOINTS =================
-CODEBAZAN_ARZ_URL = "https://api.codebazan.ir/arz/?type=arz"
-CODEBAZAN_TALA_URL = "https://api.codebazan.ir/arz/?type=tala"
-CODEBAZAN_CAR_URL = "https://api.codebazan.ir/car-price/Result.php"
+# ================= LOG =================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("multi-bot")
 
-HOLIDAY_URL_TEMPLATE = "https://holidayapi.ir/jalali/{y}/{m}/{d}"
-HAFEZ_URL = "https://hafez-dxle.onrender.com/fal"
+# ================= UI (KEYBOARD) =================
+main_keyboard = ReplyKeyboardMarkup(
+    [
+        ["🚗 قیمت خودرو", "💵 قیمت ارز"],
+        ["🥇 طلا و سکه", "₿ ارز دیجیتال"],
+        ["📅 مناسبت امروز", "🌙 فال حافظ"],
+        ["ℹ️ راهنما"],
+    ],
+    resize_keyboard=True,
+)
 
-NOBITEX_STATS_URL = "https://apiv2.nobitex.ir/market/stats"
+HELP_TEXT = (
+    "👋 سلام!\n"
+    "من یه ربات چندکاره‌ام. از دکمه‌ها استفاده کن:\n\n"
+    "🚗 قیمت خودرو: لیست کامل قیمت خودروها (بازار/کارخانه)\n"
+    "💵 قیمت ارز: نرخ ارزهای رایج\n"
+    "🥇 طلا و سکه: طلا، مثقال، سکه و...\n"
+    "₿ ارز دیجیتال: قیمت چند رمزارز (دلاری + تخمینی تومانی)\n"
+    "📅 مناسبت امروز: مناسبت‌ها و تعطیلی امروز\n"
+    "🌙 فال حافظ: یک فال\n\n"
+    "📌 نکته: اگر خروجی خیلی طولانی باشه، چند پیام پشت سر هم می‌فرستم."
+)
 
-# ================= Helpers =================
-def _norm(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = s.replace("ي", "ی").replace("ك", "ک")
-    s = re.sub(r"\s+", " ", s)
-    return s
+# ================= HTTP (shared client) =================
+_http: httpx.AsyncClient | None = None
 
-def _to_int_price(s: str):
+async def http_get_json(url: str, timeout: float = 15.0):
+    global _http
+    if _http is None:
+        _http = httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+    r = await _http.get(url)
+    r.raise_for_status()
+    # بعضی API ها Content-Type درست ندارن، پس محکم‌کاری:
+    try:
+        return r.json()
+    except Exception:
+        # تلاش برای parse متن
+        txt = r.text.strip()
+        try:
+            return json.loads(txt)
+        except Exception:
+            return {"_raw_text": txt}
+
+def chunk_text(text: str, limit: int = 3500):
+    """تلگرام 4096 محدودیت داره؛ ما امن‌تر 3500 می‌فرستیم."""
+    parts = []
+    cur = ""
+    for line in text.splitlines(True):
+        if len(cur) + len(line) > limit:
+            parts.append(cur)
+            cur = ""
+        cur += line
+    if cur:
+        parts.append(cur)
+    return parts
+
+def to_int_from_price_str(s: str) -> int | None:
     if not s:
         return None
-    # "1,356,800" -> 1356800
-    s = re.sub(r"[^\d]", "", s)
-    return int(s) if s.isdigit() else None
+    s2 = re.sub(r"[^\d]", "", str(s))
+    return int(s2) if s2.isdigit() else None
 
-def _fmt_int(n: int) -> str:
-    return f"{n:,}"
-
-def _ua_headers():
-    return {"User-Agent": "Mozilla/5.0 (TelegramBot; +https://t.me/)"}  # ساده ولی موثر
-
-def http_client(app):
-    # یک کلاینت مشترک برای کل اپ (بهتر از ساختن در هر درخواست)
-    c = app.bot_data.get("http")
-    if c is None:
-        app.bot_data["http"] = httpx.AsyncClient(
-            timeout=httpx.Timeout(12.0, connect=8.0),
-            headers=_ua_headers(),
-            follow_redirects=True,
-        )
-        c = app.bot_data["http"]
-    return c
-
-class TTLCache:
-    def __init__(self):
-        self.data = None
-        self.exp = 0
-
-    def get(self):
-        return self.data if time.time() < self.exp else None
-
-    def set(self, data, ttl=60):
-        self.data = data
-        self.exp = time.time() + ttl
-
-async def fetch_json(app, url, params=None):
-    c = http_client(app)
-    r = await c.get(url, params=params)
-    r.raise_for_status()
-    return r.json()
-
-async def fetch_text(app, url, params=None):
-    c = http_client(app)
-    r = await c.get(url, params=params)
-    r.raise_for_status()
-    return r.text
-
-# ================= Simple HTML table parser (بدون bs4) =================
-def parse_first_html_table(html: str):
-    """
-    خروجی: list[dict] با کلیدهای ستون‌ها
-    این parser خیلی ساده است و برای جدول‌های معمولی جواب می‌دهد.
-    """
-    # هدرها
-    thead = re.search(r"<thead.*?</thead>", html, flags=re.S | re.I)
-    tbody = re.search(r"<tbody.*?</tbody>", html, flags=re.S | re.I)
-    if not tbody:
-        # بعضی صفحات tbody ندارند
-        tbody = re.search(r"<table.*?</table>", html, flags=re.S | re.I)
-
-    if not tbody:
-        return []
-
-    header_cells = []
-    if thead:
-        header_cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", thead.group(0), flags=re.S | re.I)
+# ================= JALALI CONVERSION (no extra libs) =================
+def gregorian_to_jalali(gy, gm, gd):
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    if gy > 1600:
+        jy = 979
+        gy -= 1600
     else:
-        # اگر thead نبود، اولین tr را هدر فرض کن
-        first_tr = re.search(r"<tr[^>]*>.*?</tr>", tbody.group(0), flags=re.S | re.I)
-        if first_tr:
-            header_cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", first_tr.group(0), flags=re.S | re.I)
+        jy = 0
+        gy -= 621
 
-    headers = [re.sub(r"<[^>]+>", "", h).strip() for h in header_cells if h.strip()]
-    if not headers:
-        # fallback
-        headers = ["col1", "col2", "col3", "col4", "col5"]
+    gy2 = gy + 1 if gm > 2 else gy
+    days = (
+        365 * gy
+        + (gy2 + 3) // 4
+        - (gy2 + 99) // 100
+        + (gy2 + 399) // 400
+        - 80
+        + gd
+        + g_d_m[gm - 1]
+    )
 
-    rows = []
-    trs = re.findall(r"<tr[^>]*>.*?</tr>", tbody.group(0), flags=re.S | re.I)
-    for tr in trs[1:] if thead is None and len(trs) > 0 else trs:
-        tds = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr, flags=re.S | re.I)
-        cols = [re.sub(r"<[^>]+>", "", td).strip() for td in tds]
-        if len(cols) < 2:
-            continue
-        row = {}
-        for i, v in enumerate(cols):
-            k = headers[i] if i < len(headers) else f"col{i+1}"
-            row[_norm(k)] = v
-        rows.append(row)
-    return rows
+    jy += 33 * (days // 12053)
+    days %= 12053
 
-# ================= Caches =================
-ARZ_CACHE = TTLCache()
-TALA_CACHE = TTLCache()
-CAR_CACHE = TTLCache()
+    jy += 4 * (days // 1461)
+    days %= 1461
 
-COMMON_FX = ["دلار", "یورو", "پوند انگلیس", "درهم امارات", "لیر ترکیه"]
-COMMON_GOLD = ["طلای 18 عیار / 750", "مثقال طلا", "طلای ۲۴ عیار"]
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
 
-FX_CODE_MAP = {
-    "usd": "دلار",
-    "eur": "یورو",
-    "gbp": "پوند انگلیس",
-    "aed": "درهم امارات",
-    "try": "لیر ترکیه",
-}
+    if days < 186:
+        jm = 1 + days // 31
+        jd = 1 + (days % 31)
+    else:
+        jm = 7 + (days - 186) // 30
+        jd = 1 + ((days - 186) % 30)
 
-CRYPTO_MAP = {
-    "btc": "btc",
-    "eth": "eth",
-    "usdt": "usdt",
-    "xrp": "xrp",
-    "doge": "doge",
-    "ada": "ada",
-}
+    return jy, jm, jd
 
-# ================= Commands =================
-HELP_TEXT = """🧩 ربات چندکاره (API-based)
+# ================= FEATURES =================
+async def feature_hafez() -> str:
+    data = await http_get_json("https://hafez-dxle.onrender.com/fal")
+    if "_raw_text" in data:
+        return f"🌙 فال حافظ\n\n{data['_raw_text']}".strip()
 
-دستورها:
-💱 /arz [نام یا کد]  → قیمت ارز (مثلاً: /arz دلار  |  /arz usd)
-🪙 /tala [کلمه]      → قیمت طلا/سکه و ...
-🚗 /khodro [نام]     → قیمت خودرو (مثلاً: /khodro پژو 207)
-📿 /fal              → فال حافظ
-🗓️ /holiday [YYYY/MM/DD] → مناسبت‌های آن روز (پیش‌فرض: امروز)
-🕒 /now              → تاریخ امروز (شمسی + میلادی)
-₿ /crypto [symbol] [dst]  → آمار بازار نوبیتکس (مثلاً: /crypto btc rls)
+    # سعی می‌کنیم چند حالت رایج رو پوشش بدیم
+    if isinstance(data, dict):
+        title = data.get("title") or data.get("نام") or "فال حافظ"
+        poem = data.get("poem") or data.get("fal") or data.get("text") or data.get("شعر") or ""
+        interp = data.get("interpretation") or data.get("tafsir") or data.get("تعبیر") or ""
+        out = f"🌙 {title}\n\n"
+        if poem:
+            out += f"{poem}\n"
+        if interp:
+            out += f"\n🟡 تعبیر:\n{interp}\n"
+        return out.strip()
 
-نمونه‌ها:
-- /arz usd
-- /tala 18
-- /khodro دنا
-- /holiday 1404/10/12
-- /crypto btc rls
-"""
+    # اگر لیست بود
+    return f"🌙 فال حافظ\n\n{str(data)[:3500]}"
 
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_TEXT)
+async def feature_cars_all() -> str:
+    # API بدون کلید: type=all
+    data = await http_get_json("https://car.api-sina-free.workers.dev/cars?type=all")
+    cars = []
+    if isinstance(data, dict):
+        cars = data.get("cars") or []
+
+    if not cars:
+        return "🚗 الان نتونستم لیست قیمت خودرو رو بگیرم. (خروجی خالی بود)"
+
+    lines = []
+    lines.append("🚗 قیمت خودرو (همه)\n")
+    for i, c in enumerate(cars, start=1):
+        brand = (c.get("brand") or "").strip()
+        name = (c.get("name") or "").strip()
+        market = (c.get("market_price") or "").strip()
+        factory = (c.get("factory_price") or "").strip()
+        chg = (c.get("change_percent") or "").strip()
+        chv = (c.get("change_value") or "").strip()
+
+        title = f"{i}. {brand} - {name}".strip(" -")
+        lines.append(title)
+        if market:
+            lines.append(f"   بازار: {market}")
+        if factory and factory != "0":
+            lines.append(f"   کارخانه: {factory}")
+        if chg or chv:
+            lines.append(f"   تغییر: {chv} ({chg})".strip())
+        lines.append("")  # blank line
+
+    return "\n".join(lines).strip()
+
+async def feature_fx() -> str:
+    data = await http_get_json("https://api.codebazan.ir/arz/?type=arz")
+    items = []
+    if isinstance(data, dict):
+        items = data.get("Result") or []
+
+    if not items:
+        return "💵 الان نتونستم قیمت ارز رو بگیرم."
+
+    # چند ارز مهم رو اول نشون بده
+    priority = {"دلار", "یورو", "پوند انگلیس", "درهم امارات", "لیر ترکیه", "دلار کانادا"}
+    first = [x for x in items if (x.get("name") or "").strip() in priority]
+    rest = [x for x in items if x not in first]
+    show = first + rest[:20]  # خیلی طولانی نشه
+
+    lines = ["💵 قیمت ارز (نمونه‌ی مهم‌ها + چند مورد دیگر)\n"]
+    for it in show:
+        name = (it.get("name") or "").strip()
+        price = (it.get("price") or "").strip()
+        if name and price:
+            lines.append(f"• {name}: {price}")
+    lines.append("\n📌 برای دیدن همه ارزها، بهم بگو «همه ارزها» (به صورت متن طولانی می‌فرستم).")
+    return "\n".join(lines).strip()
+
+async def feature_fx_all() -> str:
+    data = await http_get_json("https://api.codebazan.ir/arz/?type=arz")
+    items = (data.get("Result") or []) if isinstance(data, dict) else []
+    if not items:
+        return "💵 الان نتونستم قیمت ارز رو بگیرم."
+    lines = ["💵 قیمت ارز (همه)\n"]
+    for it in items:
+        name = (it.get("name") or "").strip()
+        price = (it.get("price") or "").strip()
+        if name and price:
+            lines.append(f"• {name}: {price}")
+    return "\n".join(lines).strip()
+
+async def feature_gold() -> str:
+    data = await http_get_json("https://api.codebazan.ir/arz/?type=tala")
+    items = []
+    if isinstance(data, dict):
+        items = data.get("Result") or []
+    if not items:
+        return "🥇 الان نتونستم طلا و سکه رو بگیرم."
+
+    # فقط موارد مهم‌تر رو اول نشون بده
+    priority_keys = ["طلای 18 عیار", "طلای ۲۴ عیار", "مثقال", "سکه", "ربع", "نیم"]
+    def score(name: str):
+        return sum(1 for k in priority_keys if k in name)
+
+    items_sorted = sorted(items, key=lambda x: score((x.get("name") or "")), reverse=True)
+
+    lines = ["🥇 طلا و سکه (منتخب)\n"]
+    for it in items_sorted[:25]:
+        name = (it.get("name") or "").strip()
+        price = (it.get("price") or "").strip()
+        if name and price:
+            lines.append(f"• {name}: {price}")
+
+    lines.append("\n📌 اگر «همه طلا» بگی، کل لیست رو می‌فرستم.")
+    return "\n".join(lines).strip()
+
+async def feature_gold_all() -> str:
+    data = await http_get_json("https://api.codebazan.ir/arz/?type=tala")
+    items = (data.get("Result") or []) if isinstance(data, dict) else []
+    if not items:
+        return "🥇 الان نتونستم طلا و سکه رو بگیرم."
+    lines = ["🥇 طلا و سکه (همه)\n"]
+    for it in items:
+        name = (it.get("name") or "").strip()
+        price = (it.get("price") or "").strip()
+        if name and price:
+            lines.append(f"• {name}: {price}")
+    return "\n".join(lines).strip()
+
+async def get_usd_toman_rate() -> int | None:
+    data = await http_get_json("https://api.codebazan.ir/arz/?type=arz")
+    items = (data.get("Result") or []) if isinstance(data, dict) else []
+    for it in items:
+        if (it.get("name") or "").strip() == "دلار":
+            return to_int_from_price_str(it.get("price"))
+    return None
+
+async def feature_crypto() -> str:
+    # CoinLore: بدون کلید
+    data = await http_get_json("https://api.coinlore.net/api/tickers/?start=0&limit=15")
+    usd_toman = await get_usd_toman_rate()  # از همین ربات می‌گیریم
+    coins = []
+    if isinstance(data, dict):
+        coins = data.get("data") or []
+
+    if not coins:
+        return "₿ الان نتونستم قیمت ارز دیجیتال رو بگیرم."
+
+    lines = ["₿ ارز دیجیتال (۱۵ کوین اول)\n"]
+    if usd_toman:
+        lines.append(f"نرخ دلار مبنا (تقریبی): {usd_toman:,} تومان\n")
+    else:
+        lines.append("نرخ دلار مبنا پیدا نشد؛ فقط قیمت دلاری نمایش داده می‌شود.\n")
+
+    for c in coins:
+        name = c.get("name") or c.get("symbol") or "?"
+        symbol = (c.get("symbol") or "").upper()
+        price_usd = c.get("price_usd")
+        try:
+            p_usd = float(price_usd)
+        except Exception:
+            p_usd = None
+
+        line = f"• {name} ({symbol}) — ${price_usd}"
+        if usd_toman and p_usd is not None:
+            p_tm = int(p_usd * usd_toman)
+            line += f" ≈ {p_tm:,} تومان"
+        lines.append(line)
+
+    return "\n".join(lines).strip()
+
+async def feature_today_events() -> str:
+    # تاریخ امروز (UTC) -> برای ایران مناسبت روز، بهتره local باشه؛ ولی چون API جلالی می‌خواد،
+    # تاریخ سیستم رو می‌گیریم. Render معمولاً UTC هست. برای ساده‌سازی همین رو می‌گیریم:
+    now = datetime.now(timezone.utc)
+    jy, jm, jd = gregorian_to_jalali(now.year, now.month, now.day)
+
+    url = f"https://holidayapi.ir/jalali/{jy}/{jm}/{jd}"
+    data = await http_get_json(url)
+
+    if not isinstance(data, dict):
+        return "📅 الان نتونستم مناسبت امروز رو بگیرم."
+
+    # ساخت متن خوشگل:
+    date_text = data.get("date") or f"{jy}/{jm:02d}/{jd:02d}"
+    is_holiday = data.get("is_holiday")
+    events = data.get("events") or []
+
+    lines = [f"📅 مناسبت‌های امروز ({date_text})"]
+    if is_holiday is True:
+        lines.append("✅ امروز تعطیل رسمی است.")
+    elif is_holiday is False:
+        lines.append("❌ امروز تعطیل رسمی نیست.")
+    else:
+        lines.append("ℹ️ وضعیت تعطیلی مشخص نیست.")
+
+    if events and isinstance(events, list):
+        lines.append("\n🟣 مناسبت‌ها:")
+        for ev in events:
+            if isinstance(ev, dict):
+                title = ev.get("title") or ev.get("description") or ev.get("event") or str(ev)
+            else:
+                title = str(ev)
+            title = title.strip()
+            if title:
+                lines.append(f"• {title}")
+    else:
+        lines.append("\n(مناسبتی ثبت نشده)")
+
+    return "\n".join(lines).strip()
+
+# ================= HANDLERS =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "سلام 👋\nاز دکمه‌ها استفاده کن 👇",
+        reply_markup=main_keyboard,
+    )
+    await update.message.reply_text(HELP_TEXT, reply_markup=main_keyboard)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_TEXT)
+    await update.message.reply_text(HELP_TEXT, reply_markup=main_keyboard)
 
-async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    g = jdatetime.datetime.now().togregorian()
-    j = jdatetime.datetime.now()
-    await update.message.reply_text(
-        f"🕒 الان\n"
-        f"شمسی: {j.strftime('%Y/%m/%d %H:%M')}\n"
-        f"میلادی: {g.strftime('%Y-%m-%d %H:%M')}"
-    )
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
 
-async def arz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = " ".join(context.args).strip()
-    qn = _norm(q)
-    if qn in FX_CODE_MAP:
-        q = FX_CODE_MAP[qn]
-        qn = _norm(q)
-
-    app = context.application
-    data = ARZ_CACHE.get()
-    if data is None:
-        try:
-            data = await fetch_json(app, CODEBAZAN_ARZ_URL)
-            ARZ_CACHE.set(data, ttl=60)
-        except Exception:
-            await update.message.reply_text("❌ خطا در دریافت قیمت ارز. دوباره امتحان کن.")
-            return
-
-    items = data.get("Result") or []
-    if not q:
-        # نمایش چند مورد معروف
-        out = ["💱 قیمت ارز (چند مورد رایج):"]
-        for name in COMMON_FX:
-            it = next((x for x in items if _norm(x.get("name")) == _norm(name)), None)
-            if it:
-                p = it.get("price", "-")
-                out.append(f"• {it.get('name')}: {p}")
-        out.append("\nبرای جستجو: /arz دلار یا /arz usd")
-        await update.message.reply_text("\n".join(out))
+    # دکمه‌ها
+    if text in ("ℹ️ راهنما", "/help"):
+        await help_cmd(update, context)
         return
 
-    # جستجو
-    matches = [x for x in items if qn in _norm(x.get("name"))]
-    if not matches:
-        await update.message.reply_text("🔎 چیزی پیدا نکردم. یه نام دیگه بزن (مثلاً: دلار، یورو، پوند).")
-        return
-
-    out = ["💱 نتیجه:"]
-    for it in matches[:12]:
-        out.append(f"• {it.get('name')}: {it.get('price','-')}")
-    await update.message.reply_text("\n".join(out))
-
-async def tala_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = " ".join(context.args).strip()
-    qn = _norm(q)
-
-    app = context.application
-    data = TALA_CACHE.get()
-    if data is None:
-        try:
-            data = await fetch_json(app, CODEBAZAN_TALA_URL)
-            TALA_CACHE.set(data, ttl=60)
-        except Exception:
-            await update.message.reply_text("❌ خطا در دریافت قیمت طلا. دوباره امتحان کن.")
-            return
-
-    items = data.get("Result") or []
-    if not q:
-        out = ["🪙 قیمت طلا (چند مورد رایج):"]
-        for name in COMMON_GOLD:
-            it = next((x for x in items if _norm(x.get("name")) == _norm(name)), None)
-            if it:
-                out.append(f"• {it.get('name')}: {it.get('price','-')}")
-        out.append("\nبرای جستجو: /tala مثقال یا /tala 18")
-        await update.message.reply_text("\n".join(out))
-        return
-
-    matches = [x for x in items if qn in _norm(x.get("name"))]
-    if not matches:
-        await update.message.reply_text("🔎 چیزی پیدا نکردم. مثلا: /tala 18 یا /tala سکه")
-        return
-
-    out = ["🪙 نتیجه:"]
-    for it in matches[:12]:
-        out.append(f"• {it.get('name')}: {it.get('price','-')}")
-    await update.message.reply_text("\n".join(out))
-
-async def khodro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = " ".join(context.args).strip()
-    qn = _norm(q)
-
-    if not q:
-        await update.message.reply_text("🚗 اسم خودرو رو بده. مثال: /khodro پژو 207")
-        return
-
-    app = context.application
-    rows = CAR_CACHE.get()
-    if rows is None:
-        try:
-            html = await fetch_text(app, CODEBAZAN_CAR_URL)
-            rows = parse_first_html_table(html)
-            CAR_CACHE.set(rows, ttl=180)  # کمی بیشتر
-        except Exception:
-            await update.message.reply_text("❌ خطا در دریافت قیمت خودرو. دوباره امتحان کن.")
-            return
-
-    # تلاش برای پیدا کردن ستون نام/مدل
-    # چون ساختار دقیق جدول ممکنه تغییر کنه، چند کلید احتمالی رو چک می‌کنیم
-    def row_name(r):
-        for k in ["خودرو", "نام", "مدل", "title", "name", "col1"]:
-            kn = _norm(k)
-            if kn in r and r.get(kn):
-                return r.get(kn)
-        # fallback: اولین مقدار
-        return next(iter(r.values()), "")
-
-    matches = [r for r in rows if qn in _norm(row_name(r))]
-    if not matches:
-        await update.message.reply_text("🔎 چیزی پیدا نکردم. یه اسم کوتاه‌تر امتحان کن (مثلاً: 207، دنا، تارا).")
-        return
-
-    out = ["🚗 نتیجه (چند مورد):"]
-    for r in matches[:8]:
-        name = row_name(r)
-
-        # سعی می‌کنیم چند ستون معروف رو هم نمایش بدیم
-        # اگر نبود، چند مقدار اول رو می‌ریزیم بیرون
-        known = []
-        for k in ["قیمت کارخانه", "قیمت بازار", "بازار", "کارخانه", "price", "col2", "col3", "col4"]:
-            kn = _norm(k)
-            if kn in r and r.get(kn):
-                known.append(f"{k}: {r.get(kn)}")
-
-        if not known:
-            vals = list(r.values())[:4]
-            known = [f"اطلاعات: {' | '.join(vals)}"]
-
-        out.append(f"• {name}\n  " + "  |  ".join(known))
-
-    await update.message.reply_text("\n".join(out))
-
-async def fal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    app = context.application
-    try:
-        data = await fetch_json(app, HAFEZ_URL)
-        title = data.get("title", "فال حافظ")
-        content = data.get("content") or ""
-        interp = data.get("interpreter") or ""
-
-        msg = f"📿 {title}\n\n{content}\n\n📝 تعبیر:\n{interp}"
-        # تلگرام محدودیت طول دارد
-        await update.message.reply_text(msg[:3900])
-    except Exception:
-        await update.message.reply_text("❌ فال دریافت نشد. دوباره امتحان کن.")
-
-async def holiday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    arg = " ".join(context.args).strip()
-    if arg:
-        m = re.match(r"^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$", arg)
-        if not m:
-            await update.message.reply_text("فرمت درست: /holiday 1404/10/12")
-            return
-        y, mo, d = map(int, m.groups())
-    else:
-        today = jdatetime.date.today()
-        y, mo, d = today.year, today.month, today.day
-
-    url = HOLIDAY_URL_TEMPLATE.format(y=y, m=mo, d=d)
-    app = context.application
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
 
     try:
-        data = await fetch_json(app, url)
-    except Exception:
-        await update.message.reply_text("❌ خطا در دریافت مناسبت‌ها. دوباره امتحان کن.")
-        return
+        if text == "🌙 فال حافظ":
+            out = await feature_hafez()
 
-    # چون ساختار پاسخ ممکنه فرق کنه، چند حالت رو پوشش می‌دیم:
-    # - لیست holiday/events
-    # - یا متن/فیلدهای ساده
-    out = [f"🗓️ مناسبت‌های {y}/{mo:02d}/{d:02d}"]
+        elif text == "🚗 قیمت خودرو":
+            out = await feature_cars_all()
 
-    if isinstance(data, dict):
-        # رایج: events/holidays
-        for key in ["events", "holidays", "occasion", "occasions"]:
-            v = data.get(key)
-            if isinstance(v, list) and v:
-                for e in v[:15]:
-                    if isinstance(e, dict):
-                        title = e.get("title") or e.get("name") or e.get("event") or json.dumps(e, ensure_ascii=False)
-                        out.append(f"• {title}")
-                    else:
-                        out.append(f"• {str(e)}")
-                break
+        elif text == "💵 قیمت ارز":
+            out = await feature_fx()
+
+        elif text == "🥇 طلا و سکه":
+            out = await feature_gold()
+
+        elif text == "₿ ارز دیجیتال":
+            out = await feature_crypto()
+
+        elif text == "📅 مناسبت امروز":
+            out = await feature_today_events()
+
+        # چند عبارت کمکی برای «همه»
+        elif text == "همه ارزها":
+            out = await feature_fx_all()
+
+        elif text == "همه طلا":
+            out = await feature_gold_all()
+
         else:
-            # fallback: هر چی هست خلاصه
-            # اگر is_holiday داشت:
-            if "is_holiday" in data:
-                out.append(f"تعطیل رسمی: {'✅' if data.get('is_holiday') else '❌'}")
-            # اگر متن داشت:
-            for k in ["description", "text", "day", "month", "weekday"]:
-                if k in data and data.get(k):
-                    out.append(f"{k}: {data.get(k)}")
-    else:
-        out.append(str(data))
+            out = (
+                "متوجه نشدم چی می‌خوای 😅\n"
+                "از دکمه‌ها استفاده کن یا «ℹ️ راهنما» رو بزن."
+            )
 
-    await update.message.reply_text("\n".join(out)[:3900])
+        # ارسال با تکه‌تکه کردن
+        for part in chunk_text(out):
+            await update.message.reply_text(part, reply_markup=main_keyboard)
 
-async def crypto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /crypto btc rls
-    args = context.args
-    if not args:
-        await update.message.reply_text("مثال: /crypto btc rls")
-        return
+    except httpx.HTTPError as e:
+        logger.exception("HTTP error")
+        await update.message.reply_text("❌ خطا در دریافت اطلاعات از اینترنت. دوباره امتحان کن.", reply_markup=main_keyboard)
+    except Exception as e:
+        logger.exception("Unhandled error")
+        await update.message.reply_text("❌ یه خطای غیرمنتظره رخ داد. دوباره امتحان کن.", reply_markup=main_keyboard)
 
-    src = _norm(args[0])
-    src = CRYPTO_MAP.get(src, src)
-    dst = _norm(args[1]) if len(args) > 1 else "rls"
-
-    app = context.application
-    try:
-        data = await fetch_json(app, NOBITEX_STATS_URL, params={"srcCurrency": src, "dstCurrency": dst})
-    except Exception:
-        await update.message.reply_text("❌ خطا در دریافت قیمت کریپتو از نوبیتکس.")
-        return
-
-    if not isinstance(data, dict) or data.get("status") != "ok":
-        await update.message.reply_text("❌ پاسخ نامعتبر از نوبیتکس.")
-        return
-
-    stats = data.get("stats") or {}
-    # کلیدها شبیه btc-rls
-    key = f"{src}-{dst}"
-    row = stats.get(key)
-    if not row:
-        # اگر نبود، اولین مورد را نشان بده
-        if stats:
-            key, row = next(iter(stats.items()))
-        else:
-            await update.message.reply_text("❌ داده‌ای برنگشت.")
-            return
-
-    latest = row.get("latest")
-    day_change = row.get("dayChange")
-    day_low = row.get("dayLow")
-    day_high = row.get("dayHigh")
-
-    msg = (
-        f"₿ {key}\n"
-        f"آخرین قیمت: {latest}\n"
-        f"تغییر ۲۴ساعت: {day_change}%\n"
-        f"کمترین/بیشترین: {day_low} / {day_high}"
-    )
-    await update.message.reply_text(msg)
-
-async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # هر متن غیر-کامند => راهنما
-    await update.message.reply_text("برای دیدن دستورات: /help")
-
-# ================= Webhook =================
+# ================= TELEGRAM WEBHOOK =================
 application = ApplicationBuilder().token(TOKEN).build()
-
-application.add_handler(CommandHandler("start", start_cmd))
+application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
-application.add_handler(CommandHandler("now", now_cmd))
-application.add_handler(CommandHandler("arz", arz_cmd))
-application.add_handler(CommandHandler("tala", tala_cmd))
-application.add_handler(CommandHandler("khodro", khodro_cmd))
-application.add_handler(CommandHandler("fal", fal_cmd))
-application.add_handler(CommandHandler("holiday", holiday_cmd))
-application.add_handler(CommandHandler("crypto", crypto_cmd))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -464,31 +422,29 @@ async def telegram_webhook(request: Request):
 async def ping(_: Request):
     return PlainTextResponse("pong")
 
-async def on_startup():
+@asynccontextmanager
+async def lifespan(app: Starlette):
+    # init bot
     await application.initialize()
     await application.start()
-
-async def on_shutdown():
-    # بستن http client
-    c = application.bot_data.get("http")
-    if c:
-        await c.aclose()
+    logger.info("Bot started")
+    yield
+    # shutdown
     await application.stop()
     await application.shutdown()
+    if _http:
+        await _http.aclose()
+    logger.info("Bot stopped")
 
 starlette_app = Starlette(
+    lifespan=lifespan,
     routes=[
         Route("/telegram", telegram_webhook, methods=["POST"]),
-        Route("/ping", ping),
+        Route("/ping", ping, methods=["GET"]),
     ],
-    on_startup=[on_startup],
-    on_shutdown=[on_shutdown],
 )
 
 if __name__ == "__main__":
-    if not TOKEN:
-        raise RuntimeError("TOKEN env var is missing")
-
     uvicorn.run(
         starlette_app,
         host="0.0.0.0",
