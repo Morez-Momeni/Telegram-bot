@@ -32,9 +32,6 @@ import uvicorn
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# توکن نرخ (پیشنهاد: داخل ENV بذار)
-NERKH_TOKEN = os.getenv("NERKH_TOKEN", "7jJs38mZSFf6uoa6RuNTjByaWGCJgqKlMYxrlMpib5U")
-
 # ================= LOG =================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("multi-bot")
@@ -42,49 +39,65 @@ logger = logging.getLogger("multi-bot")
 # ================= UI =================
 main_keyboard = ReplyKeyboardMarkup(
     [
-        ["💵 قیمت ارز (نرخ)", "🥇 طلا و سکه (نرخ)"],
-        ["₿ کریپتو (نرخ)", "🚗 قیمت خودرو"],
-        ["📅 مناسبت امروز", "🛒 جستجوی دیجی‌کالا"],
-        ["📱 موبایل دیجی‌کالا", "🧾 محصول دیجی‌کالا با ID"],
-        ["ℹ️ راهنما", "❌ لغو"],
+        ["🚗 قیمت خودرو", "💵 قیمت ارز"],
+        ["🥇 طلا و سکه", "₿ ارز دیجیتال"],
+        ["📅 مناسبت امروز", "🛒 دیجی‌کالا"],
+        ["ℹ️ راهنما"],
+    ],
+    resize_keyboard=True,
+)
+
+digikala_keyboard = ReplyKeyboardMarkup(
+    [
+        ["📱 موبایل", "💻 لپ‌تاپ"],
+        ["👕 پوشاک", "🔎 سرچ دستی"],
+        ["⬅️ بازگشت", "❌ لغو"],
     ],
     resize_keyboard=True,
 )
 
 HELP_TEXT = (
     "🧩 ربات چندکاره\n\n"
-    "💵 قیمت ارز (نرخ): قیمت لحظه‌ای ارزها از سرویس نرخ\n"
-    "🥇 طلا و سکه (نرخ): قیمت طلا/سکه از سرویس نرخ\n"
-    "₿ کریپتو (نرخ): قیمت رمزارزها از سرویس نرخ\n"
     "🚗 قیمت خودرو: لیست کامل قیمت خودروها\n"
-    "📅 مناسبت امروز: مناسبت‌ها + تعطیل رسمی بودن\n\n"
+    "💵 قیمت ارز: نرخ ارزها\n"
+    "🥇 طلا و سکه: طلا/سکه و...\n"
+    "₿ ارز دیجیتال: قیمت چند رمزارز (دلاری + تخمینی تومانی)\n"
+    "📅 مناسبت امروز: مناسبت‌ها + تعطیلی\n\n"
     "🛒 دیجی‌کالا:\n"
-    "• «🛒 جستجوی دیجی‌کالا» → بعدش اسم کالا رو بفرست\n"
-    "• «📱 موبایل دیجی‌کالا» → لیست موبایل‌ها (صفحه‌بندی)\n"
-    "• «🧾 محصول دیجی‌کالا با ID» → بعدش ID عددی محصول رو بفرست\n\n"
-    "📌 اگر خروجی طولانی بشه، چند پیام پشت‌سرهم می‌فرستم."
+    "• «🛒 دیجی‌کالا» را بزن\n"
+    "• یک دسته انتخاب کن (موبایل/لپ‌تاپ/پوشاک)\n"
+    "• یا «🔎 سرچ دستی» بزن و عبارت جستجو را بفرست\n\n"
+    "📌 در نتایج دیجی‌کالا فقط دکمه‌های «قبلی/بعدی» صفحه نمایش داده می‌شود."
 )
 
-
-
-NERKH_BASE = "https://api.nerkh.io/v1"
-NERKH_CURRENCY_ALL = f"{NERKH_BASE}/prices/json/currency"
-NERKH_GOLD_ALL = f"{NERKH_BASE}/prices/json/gold"
-NERKH_CRYPTO_ALL = f"{NERKH_BASE}/prices/json/crypto"
-
-
+# ================= API ENDPOINTS =================
+# Car
 CAR_ALL_URL = "https://car.api-sina-free.workers.dev/cars?type=all"
 
+# Currency/Gold
+CODEBAZAN_ARZ_URL = "https://api.codebazan.ir/arz/?type=arz"
+CODEBAZAN_TALA_URL = "https://api.codebazan.ir/arz/?type=tala"
 
+# Crypto
+COINLORE = "https://api.coinlore.net/api/tickers/?start=0&limit=15"
+
+# Holiday
 HOLIDAY_URL = "https://holidayapi.ir/jalali/{y}/{m}/{d}"
 
-
+# Digikala (v1)
 DIGIKALA_BASE = "https://api.digikala.com/v1"
 DK_SEARCH = f"{DIGIKALA_BASE}/search/"
-DK_MOBILE_CAT = f"{DIGIKALA_BASE}/categories/mobile-phone/search/"
-DK_PRODUCT = f"{DIGIKALA_BASE}/product/{{pid}}/"
+DK_CATEGORY = f"{DIGIKALA_BASE}/categories/{{slug}}/search/"
 
-_http: httpx.AsyncClient | None = None
+# دسته‌های پیشنهادی (قابل افزایش)
+DIGIKALA_CATEGORIES = {
+    "📱 موبایل": ("mobile-phone", "موبایل"),
+    "💻 لپ‌تاپ": ("notebook-netbook-ultrabook", "لپ‌تاپ"),
+    "👕 پوشاک": ("apparel", "پوشاک"),
+}
+
+# ================= HTTP CLIENT =================
+_http = None
 
 def _http_client() -> httpx.AsyncClient:
     global _http
@@ -100,9 +113,9 @@ def _http_client() -> httpx.AsyncClient:
         )
     return _http
 
-async def http_get_json(url: str, params: dict | None = None, headers: dict | None = None):
+async def http_get_json(url: str, params: dict | None = None):
     c = _http_client()
-    r = await c.get(url, params=params, headers=headers)
+    r = await c.get(url, params=params)
     r.raise_for_status()
     try:
         return r.json()
@@ -133,7 +146,13 @@ def deep_get(d, keys: list[str], default=None):
             return default
     return cur
 
+def to_int_from_price_str(s: str) -> int | None:
+    if not s:
+        return None
+    s2 = re.sub(r"[^\d]", "", str(s))
+    return int(s2) if s2.isdigit() else None
 
+# ================= JALALI (no extra libs) =================
 def gregorian_to_jalali(gy, gm, gd):
     g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
     if gy > 1600:
@@ -173,89 +192,7 @@ def gregorian_to_jalali(gy, gm, gd):
 
     return jy, jm, jd
 
-
-def nerkh_headers():
-    # طبق نمونه‌ها: Authorization: Bearer <TOKEN>
-    return {"Authorization": f"Bearer {NERKH_TOKEN}"}
-
-def normalize_nerkh_list(payload) -> list[dict]:
-    """
-    چون ساختار دقیق ممکنه تغییر کنه، تلاش می‌کنیم لیست آیتم‌ها رو از چند مسیر پیدا کنیم.
-    """
-    if isinstance(payload, list):
-        return payload
-    if not isinstance(payload, dict):
-        return []
-    for path in (["data"], ["result"], ["items"], ["prices"], ["data", "items"]):
-        v = deep_get(payload, path, None)
-        if isinstance(v, list):
-            return v
-    # اگر dict از نماد به آبجکت بود
-    if all(isinstance(v, dict) for v in payload.values()) and len(payload) > 0:
-        out = []
-        for k, v in payload.items():
-            v2 = dict(v)
-            v2.setdefault("symbol", k)
-            out.append(v2)
-        return out
-    return []
-
-def format_nerkh_item(it: dict) -> str:
-    # کلیدهای رایج احتمالی
-    name = it.get("name_fa") or it.get("name") or it.get("title") or it.get("symbol") or "—"
-    symbol = it.get("symbol") or it.get("code") or ""
-    price = it.get("price") or it.get("value") or it.get("latest") or it.get("rate") or ""
-    unit = it.get("unit") or it.get("currency") or "تومان"
-    # بعضی‌ها price عددی هست
-    if isinstance(price, (int, float)):
-        price_txt = f"{int(price):,}"
-    else:
-        price_txt = str(price).strip()
-    if symbol and symbol not in str(name):
-        head = f"{name} ({symbol})"
-    else:
-        head = f"{name}"
-    if price_txt:
-        return f"• {head}: {price_txt} {unit}".strip()
-    return f"• {head}"
-
-async def feature_nerkh_currency() -> str:
-    data = await http_get_json(NERKH_CURRENCY_ALL, headers=nerkh_headers())
-    items = normalize_nerkh_list(data)
-    if not items:
-        return "💵 خطا در دریافت ارز از نرخ (خروجی خالی/مسدود)."
-    lines = ["💵 قیمت ارز (نرخ)\n"]
-    for it in items[:60]:
-        lines.append(format_nerkh_item(it))
-    if len(items) > 60:
-        lines.append("\n(لیست کامل خیلی طولانی بود؛ بخشی نمایش داده شد.)")
-    return "\n".join(lines).strip()
-
-async def feature_nerkh_gold() -> str:
-    data = await http_get_json(NERKH_GOLD_ALL, headers=nerkh_headers())
-    items = normalize_nerkh_list(data)
-    if not items:
-        return "🥇 خطا در دریافت طلا/سکه از نرخ (خروجی خالی/مسدود)."
-    lines = ["🥇 طلا و سکه (نرخ)\n"]
-    for it in items[:80]:
-        lines.append(format_nerkh_item(it))
-    if len(items) > 80:
-        lines.append("\n(لیست کامل خیلی طولانی بود؛ بخشی نمایش داده شد.)")
-    return "\n".join(lines).strip()
-
-async def feature_nerkh_crypto() -> str:
-    data = await http_get_json(NERKH_CRYPTO_ALL, headers=nerkh_headers())
-    items = normalize_nerkh_list(data)
-    if not items:
-        return "₿ خطا در دریافت کریپتو از نرخ (خروجی خالی/مسدود)."
-    lines = ["₿ ارز دیجیتال (نرخ)\n"]
-    for it in items[:60]:
-        lines.append(format_nerkh_item(it))
-    if len(items) > 60:
-        lines.append("\n(لیست کامل خیلی طولانی بود؛ بخشی نمایش داده شد.)")
-    return "\n".join(lines).strip()
-
-
+# ================= FEATURES =================
 async def feature_cars_all() -> str:
     data = await http_get_json(CAR_ALL_URL)
     cars = data.get("cars") if isinstance(data, dict) else None
@@ -274,6 +211,71 @@ async def feature_cars_all() -> str:
         if factory and factory != "0":
             lines.append(f"   کارخانه: {factory}")
         lines.append("")
+    return "\n".join(lines).strip()
+
+async def feature_fx() -> str:
+    data = await http_get_json(CODEBAZAN_ARZ_URL)
+    items = data.get("Result") if isinstance(data, dict) else None
+    if not items:
+        return "💵 الان نتونستم قیمت ارز رو بگیرم."
+    priority = {"دلار", "یورو", "پوند انگلیس", "درهم امارات", "لیر ترکیه", "دلار کانادا"}
+    first = [x for x in items if (x.get("name") or "").strip() in priority]
+    rest = [x for x in items if x not in first]
+    show = first + rest[:20]
+    lines = ["💵 قیمت ارز (منتخب)\n"]
+    for it in show:
+        name = (it.get("name") or "").strip()
+        price = (it.get("price") or "").strip()
+        if name and price:
+            lines.append(f"• {name}: {price}")
+    return "\n".join(lines).strip()
+
+async def feature_gold() -> str:
+    data = await http_get_json(CODEBAZAN_TALA_URL)
+    items = data.get("Result") if isinstance(data, dict) else None
+    if not items:
+        return "🥇 الان نتونستم طلا و سکه رو بگیرم."
+    priority_keys = ["طلای 18", "طلای ۱۸", "طلای ۲۴", "طلای 24", "مثقال", "سکه", "ربع", "نیم"]
+    def score(name: str):
+        return sum(1 for k in priority_keys if k in name)
+    items_sorted = sorted(items, key=lambda x: score((x.get("name") or "")), reverse=True)
+    lines = ["🥇 طلا و سکه (منتخب)\n"]
+    for it in items_sorted[:30]:
+        name = (it.get("name") or "").strip()
+        price = (it.get("price") or "").strip()
+        if name and price:
+            lines.append(f"• {name}: {price}")
+    return "\n".join(lines).strip()
+
+async def get_usd_toman_rate() -> int | None:
+    data = await http_get_json(CODEBAZAN_ARZ_URL)
+    items = data.get("Result") if isinstance(data, dict) else []
+    for it in items or []:
+        if (it.get("name") or "").strip() == "دلار":
+            return to_int_from_price_str(it.get("price"))
+    return None
+
+async def feature_crypto() -> str:
+    data = await http_get_json(COINLORE)
+    coins = data.get("data") if isinstance(data, dict) else None
+    if not coins:
+        return "₿ الان نتونستم قیمت ارز دیجیتال رو بگیرم."
+    usd_toman = await get_usd_toman_rate()
+    lines = ["₿ ارز دیجیتال (۱۵ کوین اول)\n"]
+    if usd_toman:
+        lines.append(f"نرخ دلار مبنا (تقریبی): {usd_toman:,} تومان\n")
+    for c in coins:
+        name = c.get("name") or c.get("symbol") or "?"
+        symbol = (c.get("symbol") or "").upper()
+        price_usd = c.get("price_usd")
+        line = f"• {name} ({symbol}) — ${price_usd}"
+        if usd_toman:
+            try:
+                p_tm = int(float(price_usd) * usd_toman)
+                line += f" ≈ {p_tm:,} تومان"
+            except Exception:
+                pass
+        lines.append(line)
     return "\n".join(lines).strip()
 
 async def feature_today_events() -> str:
@@ -308,15 +310,7 @@ async def feature_today_events() -> str:
         lines.append("\n(مناسبتی ثبت نشده)")
     return "\n".join(lines).strip()
 
-
-async def dk_get_json(url: str, params: dict | None = None):
-    try:
-        return await http_get_json(url, params=params)
-    except Exception:
-        if url.endswith("/"):
-            return await http_get_json(url[:-1], params=params)
-        return await http_get_json(url + "/", params=params)
-
+# ================= DIGIKALA =================
 def dk_extract_products(payload: dict) -> list[dict]:
     for path in (["data", "products"], ["data", "search", "products"], ["data", "items"], ["products"]):
         v = deep_get(payload, path, None)
@@ -334,92 +328,55 @@ def dk_price_text(prod: dict) -> str:
             dp = price.get("discount_percent")
             parts = []
             if sp is not None:
-                parts.append(f"💰 {sp:,} تومان" if isinstance(sp, int) else f"💰 {sp} تومان")
+                parts.append(f"{sp:,} تومان" if isinstance(sp, int) else f"{sp} تومان")
             if dp:
-                parts.append(f"🔻 {dp}%")
+                parts.append(f"🔻{dp}%")
             if rp and rp != sp:
                 parts.append(f"(قبل: {rp:,})" if isinstance(rp, int) else f"(قبل: {rp})")
             if parts:
                 return " ".join(parts)
     return "—"
 
-async def feature_dk_search(query: str, page: int = 1) -> tuple[str, InlineKeyboardMarkup | None]:
-    payload = await dk_get_json(DK_SEARCH, params={"q": query, "page": page})
+async def dk_search(query: str, page: int = 1) -> tuple[str, InlineKeyboardMarkup | None]:
+    payload = await http_get_json(DK_SEARCH, params={"q": query, "page": page})
     prods = dk_extract_products(payload)
     if not prods:
-        return "🛒 نتیجه‌ای پیدا نشد. یه عبارت دیگه امتحان کن.", None
+        return f"🛒 نتیجه‌ای برای «{query}» پیدا نشد.", None
 
-    lines = [f"🛒 نتایج دیجی‌کالا برای: «{query}» (صفحه {page})\n"]
-    buttons = []
-    for p in prods[:10]:
-        pid = p.get("id") or p.get("dkp_id") or p.get("product_id")
+    lines = [f"🛒 دیجی‌کالا | جستجو: «{query}» | صفحه {page}\n"]
+    for p in prods[:12]:
         title = p.get("title_fa") or p.get("title") or p.get("name") or "بدون عنوان"
-        title = str(title).strip()
         price = dk_price_text(p)
-        if pid:
-            lines.append(f"• {title}\n  {price}\n  🆔 {pid}\n")
-            buttons.append([InlineKeyboardButton(f"🧾 {title[:22]}", callback_data=f"dkp_{pid}")])
-        else:
-            lines.append(f"• {title}\n  {price}\n")
+        lines.append(f"• {str(title).strip()}\n  💰 {price}\n")
 
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"dks_{page-1}"))
     nav.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"dks_{page+1}"))
-    buttons.append(nav)
+    markup = InlineKeyboardMarkup([nav]) if nav else None
+    return "\n".join(lines).strip(), markup
 
-    return "\n".join(lines).strip(), InlineKeyboardMarkup(buttons)
-
-async def feature_dk_mobile(page: int = 1) -> tuple[str, InlineKeyboardMarkup | None]:
-    payload = await dk_get_json(DK_MOBILE_CAT, params={"page": page})
+async def dk_category(slug: str, title_fa: str, page: int = 1) -> tuple[str, InlineKeyboardMarkup | None]:
+    url = DK_CATEGORY.format(slug=slug)
+    payload = await http_get_json(url, params={"page": page})
     prods = dk_extract_products(payload)
     if not prods:
-        return "📱 فعلاً لیست موبایل‌ها نیومد. دوباره تلاش کن.", None
+        return f"🛒 دیجی‌کالا | {title_fa}\nنتیجه‌ای پیدا نشد.", None
 
-    lines = [f"📱 موبایل‌های دیجی‌کالا (صفحه {page})\n"]
-    buttons = []
-    for p in prods[:10]:
-        pid = p.get("id") or p.get("product_id")
+    lines = [f"🛒 دیجی‌کالا | دسته: {title_fa} | صفحه {page}\n"]
+    for p in prods[:12]:
         title = p.get("title_fa") or p.get("title") or p.get("name") or "بدون عنوان"
         price = dk_price_text(p)
-        if pid:
-            lines.append(f"• {title}\n  {price}\n  🆔 {pid}\n")
-            buttons.append([InlineKeyboardButton(f"🧾 {str(title)[:22]}", callback_data=f"dkp_{pid}")])
-        else:
-            lines.append(f"• {title}\n  {price}\n")
+        lines.append(f"• {str(title).strip()}\n  💰 {price}\n")
 
     nav = []
     if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"dkm_{page-1}"))
-    nav.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"dkm_{page+1}"))
-    buttons.append(nav)
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"dkc_{slug}_{page-1}"))
+    nav.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"dkc_{slug}_{page+1}"))
+    markup = InlineKeyboardMarkup([nav]) if nav else None
+    return "\n".join(lines).strip(), markup
 
-    return "\n".join(lines).strip(), InlineKeyboardMarkup(buttons)
-
-async def feature_dk_product(pid: str) -> str:
-    payload = await dk_get_json(DK_PRODUCT.format(pid=pid))
-    prod = deep_get(payload, ["data", "product"], None) or deep_get(payload, ["data"], None) or payload
-    if not isinstance(prod, dict):
-        return "🧾 جزئیات محصول دریافت نشد."
-
-    title = prod.get("title_fa") or prod.get("title") or prod.get("name") or "بدون عنوان"
-    url = prod.get("url") or prod.get("share_url") or ""
-    rating = deep_get(prod, ["rating", "rate"], None) or prod.get("rating") or None
-    price = dk_price_text(prod)
-
-    if price == "—":
-        dv = deep_get(payload, ["data", "product", "default_variant"], None)
-        if isinstance(dv, dict):
-            price = dk_price_text({"default_variant": dv})
-
-    lines = [f"🧾 جزئیات محصول", f"🆔 {pid}", f"📦 {title}", f"{price}"]
-    if rating:
-        lines.append(f"⭐ امتیاز: {rating}")
-    if url:
-        lines.append(f"🔗 لینک: {url}")
-    return "\n".join(lines).strip()
-
-
+# ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("سلام 👋 از دکمه‌ها استفاده کن 👇", reply_markup=main_keyboard)
@@ -430,7 +387,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("awaiting", None)
-    await update.message.reply_text("✅ لغو شد. از دکمه‌ها استفاده کن.", reply_markup=main_keyboard)
+    context.user_data.pop("dk_in_menu", None)
+    await update.message.reply_text("✅ لغو شد.", reply_markup=main_keyboard)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -441,50 +399,70 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cancel_cmd(update, context); return
 
     awaiting = context.user_data.get("awaiting")
+    dk_in_menu = context.user_data.get("dk_in_menu")
+
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
 
     try:
-        # حالت‌های ورودی دیجی‌کالا
+        # ---- حالت ورود عبارت سرچ دستی دیجی‌کالا ----
         if awaiting == "dk_search_query":
             context.user_data.pop("awaiting", None)
             context.user_data["last_dk_query"] = text
-            msg, markup = await feature_dk_search(text, page=1)
-            await update.message.reply_text(msg, reply_markup=markup or main_keyboard)
+            msg, markup = await dk_search(text, page=1)
+            await update.message.reply_text(msg, reply_markup=markup or digikala_keyboard)
             return
 
-        if awaiting == "dk_product_id":
+        # ---- منوی دیجی‌کالا ----
+        if text == "🛒 دیجی‌کالا":
+            context.user_data["dk_in_menu"] = True
             context.user_data.pop("awaiting", None)
-            pid = re.sub(r"[^\d]", "", text)
-            if not pid:
-                await update.message.reply_text("🧾 لطفاً فقط ID عددی بفرست.", reply_markup=main_keyboard)
-                return
-            msg = await feature_dk_product(pid)
-            await update.message.reply_text(msg, reply_markup=main_keyboard)
+            await update.message.reply_text(
+                "🛒 دیجی‌کالا\nیک دسته انتخاب کن یا «🔎 سرچ دستی» رو بزن.",
+                reply_markup=digikala_keyboard,
+            )
             return
 
-        # دکمه‌ها
-        if text == "💵 قیمت ارز (نرخ)":
-            out = await feature_nerkh_currency()
-            for part in chunk_text(out):
-                await update.message.reply_text(part, reply_markup=main_keyboard)
+        # بازگشت از منوی دیجی‌کالا
+        if text == "⬅️ بازگشت":
+            context.user_data.pop("dk_in_menu", None)
+            context.user_data.pop("awaiting", None)
+            await update.message.reply_text("برگشتی به منوی اصلی 👇", reply_markup=main_keyboard)
             return
 
-        if text == "🥇 طلا و سکه (نرخ)":
-            out = await feature_nerkh_gold()
-            for part in chunk_text(out):
-                await update.message.reply_text(part, reply_markup=main_keyboard)
+        # داخل منوی دیجی‌کالا دسته‌ها
+        if dk_in_menu and text in DIGIKALA_CATEGORIES:
+            slug, fa_title = DIGIKALA_CATEGORIES[text]
+            context.user_data["last_dk_category_slug"] = slug
+            context.user_data["last_dk_category_title"] = fa_title
+            msg, markup = await dk_category(slug, fa_title, page=1)
+            await update.message.reply_text(msg, reply_markup=markup or digikala_keyboard)
             return
 
-        if text == "₿ کریپتو (نرخ)":
-            out = await feature_nerkh_crypto()
-            for part in chunk_text(out):
-                await update.message.reply_text(part, reply_markup=main_keyboard)
+        if dk_in_menu and text == "🔎 سرچ دستی":
+            context.user_data["awaiting"] = "dk_search_query"
+            await update.message.reply_text("چی رو سرچ کنم؟ (مثلاً: آیفون 13)", reply_markup=digikala_keyboard)
             return
 
+        # ---- بخش‌های اصلی ----
         if text == "🚗 قیمت خودرو":
             out = await feature_cars_all()
             for part in chunk_text(out):
                 await update.message.reply_text(part, reply_markup=main_keyboard)
+            return
+
+        if text == "💵 قیمت ارز":
+            out = await feature_fx()
+            await update.message.reply_text(out, reply_markup=main_keyboard)
+            return
+
+        if text == "🥇 طلا و سکه":
+            out = await feature_gold()
+            await update.message.reply_text(out, reply_markup=main_keyboard)
+            return
+
+        if text == "₿ ارز دیجیتال":
+            out = await feature_crypto()
+            await update.message.reply_text(out, reply_markup=main_keyboard)
             return
 
         if text == "📅 مناسبت امروز":
@@ -492,30 +470,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(out, reply_markup=main_keyboard)
             return
 
-        if text == "🛒 جستجوی دیجی‌کالا":
-            context.user_data["awaiting"] = "dk_search_query"
-            await update.message.reply_text("چی رو تو دیجی‌کالا سرچ کنم؟ (مثلاً: آیفون 13)", reply_markup=main_keyboard)
-            return
-
-        if text == "📱 موبایل دیجی‌کالا":
-            msg, markup = await feature_dk_mobile(page=1)
-            await update.message.reply_text(msg, reply_markup=markup or main_keyboard)
-            return
-
-        if text == "🧾 محصول دیجی‌کالا با ID":
-            context.user_data["awaiting"] = "dk_product_id"
-            await update.message.reply_text("ID محصول رو بفرست (فقط عدد). مثال: 6850997", reply_markup=main_keyboard)
-            return
-
         await update.message.reply_text("متوجه نشدم 😅 یکی از دکمه‌ها رو بزن یا «ℹ️ راهنما».", reply_markup=main_keyboard)
 
     except httpx.HTTPError:
         logger.exception("HTTP error")
-        await update.message.reply_text(
-            "❌ خطا در دریافت اطلاعات.\n"
-            "اگر مشکل از «نرخ» بود، احتمالاً به خاطر محدودیت IP غیرایران است.",
-            reply_markup=main_keyboard
-        )
+        await update.message.reply_text("❌ خطا در دریافت اطلاعات از اینترنت. دوباره امتحان کن.", reply_markup=main_keyboard)
     except Exception:
         logger.exception("Unhandled error")
         await update.message.reply_text("❌ یه خطای غیرمنتظره رخ داد. دوباره امتحان کن.", reply_markup=main_keyboard)
@@ -528,37 +487,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_chat_action(q.message.chat_id, ChatAction.TYPING)
 
-        if data.startswith("dkp_"):
-            pid = data.split("_", 1)[1]
-            msg = await feature_dk_product(pid)
-            await q.message.reply_text(msg, reply_markup=main_keyboard)
-            return
-
+        # جستجوی دستی: dks_<page>
         if data.startswith("dks_"):
             page = int(data.split("_", 1)[1])
             last_q = context.user_data.get("last_dk_query")
             if not last_q:
-                await q.message.reply_text("برای صفحه‌بندی، دوباره «🛒 جستجوی دیجی‌کالا» رو بزن.", reply_markup=main_keyboard)
+                await q.message.reply_text("برای صفحه‌بندی، اول «🔎 سرچ دستی» رو بزن.", reply_markup=digikala_keyboard)
                 return
-            msg, markup = await feature_dk_search(last_q, page=page)
-            await q.message.reply_text(msg, reply_markup=markup or main_keyboard)
+            msg, markup = await dk_search(last_q, page=page)
+            await q.message.reply_text(msg, reply_markup=markup or digikala_keyboard)
             return
 
-        if data.startswith("dkm_"):
-            page = int(data.split("_", 1)[1])
-            msg, markup = await feature_dk_mobile(page=page)
-            await q.message.reply_text(msg, reply_markup=markup or main_keyboard)
+        # دسته‌بندی: dkc_<slug>_<page>
+        if data.startswith("dkc_"):
+            _, slug, page_s = data.split("_", 2)
+            page = int(page_s)
+            fa_title = context.user_data.get("last_dk_category_title") or slug
+            msg, markup = await dk_category(slug, fa_title, page=page)
+            await q.message.reply_text(msg, reply_markup=markup or digikala_keyboard)
             return
 
     except Exception:
         logger.exception("Callback error")
-        await q.message.reply_text("❌ خطا. دوباره امتحان کن.", reply_markup=main_keyboard)
+        await q.message.reply_text("❌ خطا. دوباره امتحان کن.", reply_markup=digikala_keyboard)
 
 # ================= TELEGRAM WEBHOOK =================
 application = ApplicationBuilder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
-application.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(dkp_|dks_|dkm_)"))
+application.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(dks_|dkc_)"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 async def telegram_webhook(request: Request):
