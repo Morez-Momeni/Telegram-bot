@@ -2,6 +2,7 @@ import os
 import random
 import sqlite3
 import asyncio
+
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -35,7 +36,7 @@ BB_LLM_PROVIDER = os.getenv("BB_LLM_PROVIDER", "google")
 BB_MODEL_NAME = os.getenv("BB_MODEL_NAME", "gemini-2.5-pro")
 
 # ================= CONFIG =================
-DEFAULT_INTERVAL = 1800  # 30 minutes
+DEFAULT_INTERVAL = 1800  # 30 minutes (safe on Render Free)
 
 # ================= MESSAGES =================
 MESSAGES = [
@@ -93,7 +94,10 @@ def init_db():
 def get_chat(chat_id):
     con = db()
     cur = con.cursor()
-    cur.execute("SELECT interval, is_active, chat_enabled, bb_thread_id FROM chats WHERE chat_id=?", (chat_id,))
+    cur.execute(
+        "SELECT interval, is_active, chat_enabled, bb_thread_id FROM chats WHERE chat_id=?",
+        (chat_id,),
+    )
     row = cur.fetchone()
     if not row:
         cur.execute("INSERT INTO chats (chat_id) VALUES (?)", (chat_id,))
@@ -144,7 +148,7 @@ def stop_job(context, chat_id):
         jm[chat_id].schedule_removal()
         jm.pop(chat_id)
 
-# ================= BACKBOARD CHAT (RAW MODE) =================
+# ================= BACKBOARD CHAT (STABLE) =================
 def bb_client(app):
     if "bb" not in app.bot_data:
         app.bot_data["bb"] = BackboardClient(api_key=BACKBOARD_API_KEY)
@@ -161,8 +165,16 @@ async def get_thread(app, chat_id):
         description="Persian friendly assistant",
     )
     thread = await client.create_thread(assistant.assistant_id)
+
     update_chat(chat_id, bb_thread_id=str(thread.thread_id))
     return str(thread.thread_id)
+
+async def get_last_assistant_message(client, thread_id):
+    messages = await client.get_thread_messages(thread_id)
+    for msg in reversed(messages):
+        if getattr(msg, "role", None) == "assistant":
+            return msg.content
+    return None
 
 async def chat_reply(app, chat_id, text):
     if not BACKBOARD_API_KEY:
@@ -172,23 +184,22 @@ async def chat_reply(app, chat_id, text):
     thread_id = await get_thread(app, chat_id)
 
     try:
-        raw = await client.add_message(
+        await client.add_message(
             thread_id=thread_id,
             content=text,
             llm_provider=BB_LLM_PROVIDER,
             model_name=BB_MODEL_NAME,
             stream=False,
-            raw=True,   # 🔥 کلید حل مشکل
         )
 
-        # استخراج امن متن
-        if isinstance(raw, dict):
-            if "output_text" in raw:
-                return raw["output_text"][:3500]
-            if "message" in raw:
-                return raw["message"][:3500]
+        # زمان کوتاه برای تولید پاسخ
+        await asyncio.sleep(1.2)
 
-        return "پاسخی دریافت نشد، دوباره بگو 🙏"
+        reply = await get_last_assistant_message(client, thread_id)
+        if reply:
+            return str(reply).strip()[:3500]
+
+        return "پاسخی دریافت نشد، دوباره امتحان کن 🙏"
 
     except Exception as e:
         print("Backboard error:", e)
@@ -230,7 +241,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_intervals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏱ فاصله زمانی رو انتخاب کن:", reply_markup=interval_keyboard)
+    await update.message.reply_text(
+        "⏱ فاصله زمانی رو انتخاب کن:",
+        reply_markup=interval_keyboard,
+    )
 
 async def interval_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
