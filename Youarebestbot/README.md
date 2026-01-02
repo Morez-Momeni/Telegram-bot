@@ -10,8 +10,8 @@ A clean, multi-purpose Telegram bot (Persian-first) featuring **prices, holidays
   <img src="https://img.shields.io/badge/LLM-Gemini-FF6F00" />
 </p>
 
-**Telegram Bot:** `@YOUR_BOT_USERNAME`  
-*(Replace with your real bot username)*
+**Telegram Bot:** `@youarebestbot`  
+
 
 ---
 
