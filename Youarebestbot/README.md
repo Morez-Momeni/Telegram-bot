@@ -1,52 +1,52 @@
 # YouAreBestBot 🤖
-A multi-purpose Persian Telegram bot with prices, holidays and Digikala search — deployed easily on Render using Webhook.
 
-<p align="center">
+A clean, multi-purpose Telegram bot (Persian-first) featuring **prices, holidays, Digikala search**, and an optional **Gemini chatbot mode** — deployable on **Render** via webhook.
+
+<p>
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" />
   <img src="https://img.shields.io/badge/Telegram-Bot-26A5E4" />
-  <img src="https://img.shields.io/badge/Deploy-Render-purple" />
-  <img src="https://img.shields.io/badge/Webhook-Starlette%20%2B%20Uvicorn-green" />
+  <img src="https://img.shields.io/badge/Deploy-Render-8A2BE2" />
+  <img src="https://img.shields.io/badge/Webhook-Starlette%20%2B%20Uvicorn-2E8B57" />
+  <img src="https://img.shields.io/badge/LLM-Gemini-FF6F00" />
 </p>
 
+**Telegram Bot:** `@YOUR_BOT_USERNAME`  
+*(Replace with your real bot username)*
+
 ---
 
-## 🇮🇷 معرفی (Persian)
+## Features
 
-**YouAreBestBot** یک ربات تلگرام چندکاره‌ست که با دکمه‌های آماده کار می‌کند و ویژگی‌های کاربردی روزمره را ارائه می‌دهد:
+###  Gemini Chatbot (Optional)
+- Chat mode with lightweight per-user memory
+- Exit anytime with “End Chat”
+- Friendly handling for common errors (401 / 429 / blocked prompts)
 
-### ✅ امکانات
-- 🚗 **قیمت خودرو** (نمایش لیست قیمت خودروها)
-- 💵 **قیمت ارز** (نمایش نرخ ارزهای منتخب)
-- 🥇 **طلا و سکه** (نمایش قیمت طلا و سکه)
-- ₿ **ارز دیجیتال** (نمایش قیمت چند رمزارز + تبدیل تقریبی به تومان با نرخ دلار)
-- 📅 **مناسبت امروز** (نمایش مناسبت‌ها + تعطیل رسمی بودن یا نبودن)
-- 🛒 **دیجی‌کالا**
-  - انتخاب دسته‌ها (موبایل / لپ‌تاپ / پوشاک)
-  - سرچ دستی
-  - صفحه‌بندی با دکمه‌های **قبلی/بعدی**
-  - نمایش متن مرتب و خوانا (بدون دکمه‌های زیر هر محصول)
+### 📈 Prices & Markets
+- 🚗 Car prices (list)
+- 💵 FX rates
+- 🥇 Gold & coin prices
+- ₿ Crypto prices (+ approximate IRR conversion using USD rate)
 
-### 🧱 تکنولوژی‌ها
+### 📅 Calendar
+- 📅 Today’s events + official holiday status (formatted text)
+
+### 🛒 Digikala Search
+- Category browsing: Mobile / Laptop / Apparel
+- Manual search
+- Prev / Next pagination
+- Clean output (no per-item inline buttons)
+
+---
+
+## Tech Stack
 - `python-telegram-bot`
-- `Starlette + Uvicorn` (Webhook Server)
-- `httpx` (API requests)
-- Deploy-friendly on **Render**
+- `Starlette + Uvicorn` (Webhook server)
+- `httpx` (async API calls)
+- Google Gemini (optional chatbot)
 
 ---
+## Try it
+**Telegram Bot:** https://t.me/youarebestbot
 
-##  Overview (English)
-
-**YouAreBestBot** is a multi-purpose Telegram bot (Persian-first) with a clean button-based UI and daily useful features:
-
-### ✅ Features
-- 🚗 **Car prices** (shows a list of available car prices)
-- 💵 **FX rates** (selected currencies)
-- 🥇 **Gold & coins** (gold/coin price list)
-- ₿ **Crypto prices** (top tickers + approximate IRR conversion using USD rate)
-- 📅 **Today holidays/events** (events + official holiday status)
-- 🛒 **Digikala**
-  - Category browsing (Mobile / Laptop / Apparel)
-  - Manual search
-  - **Prev/Next** pagination buttons
-  - Clean text output (no per-item inline buttons)
 
