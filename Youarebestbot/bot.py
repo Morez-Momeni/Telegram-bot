@@ -28,18 +28,24 @@ from starlette.responses import Response, PlainTextResponse
 from starlette.routing import Route
 import uvicorn
 
+# ================= ENV =================
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
+GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()  # پیشنهاد: gemini-2.5-flash
+
+# ================= LOG =================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("multi-bot")
 
+# ================= UI =================
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["🚗 قیمت خودرو", "💵 قیمت ارز"],
         ["🥇 طلا و سکه", "₿ ارز دیجیتال"],
         ["📅 مناسبت امروز", "🛒 دیجی‌کالا"],
-        ["ℹ️ راهنما"],
+        ["💬 چت‌بات", "ℹ️ راهنما"],
     ],
     resize_keyboard=True,
 )
@@ -53,6 +59,14 @@ digikala_menu_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+chat_keyboard = ReplyKeyboardMarkup(
+    [
+        ["🛑 پایان چت", "⬅️ بازگشت"],
+        ["ℹ️ راهنما"],
+    ],
+    resize_keyboard=True,
+)
+
 HELP_TEXT = (
     "🧩 ربات چندکاره\n\n"
     "🚗 قیمت خودرو: لیست قیمت خودروها\n"
@@ -62,9 +76,13 @@ HELP_TEXT = (
     "📅 مناسبت امروز: مناسبت‌ها و تعطیلی رسمی\n\n"
     "🛒 دیجی‌کالا:\n"
     "• «🛒 دیجی‌کالا» → انتخاب دسته یا سرچ دستی\n"
-    "• نتایج: فقط متن + دکمه قبلی/بعدی\n"
+    "• نتایج: فقط متن + دکمه قبلی/بعدی\n\n"
+    "💬 چت‌بات:\n"
+    "• شروع گفتگو آزاد\n"
+    "• خروج از چت: «🛑 پایان چت»\n"
 )
 
+# ================= API ENDPOINTS =================
 CAR_ALL_URL = "https://car.api-sina-free.workers.dev/cars?type=all"
 
 CODEBAZAN_ARZ_URL = "https://api.codebazan.ir/arz/?type=arz"
@@ -84,13 +102,17 @@ DIGIKALA_CATS = {
     "👕 پوشاک دیجی‌کالا": ("apparel", "پوشاک"),
 }
 
+# Gemini REST
+GEMINI_URL = lambda model: f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+# ================= HTTP CLIENT =================
 _http: httpx.AsyncClient | None = None
 
 def _http_client() -> httpx.AsyncClient:
     global _http
     if _http is None:
         _http = httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0, connect=10.0),
+            timeout=httpx.Timeout(25.0, connect=10.0),
             follow_redirects=True,
             headers={
                 "User-Agent": "Mozilla/5.0 (TelegramBot)",
@@ -105,29 +127,38 @@ async def http_get_json(url: str, params: dict | None = None, headers: dict | No
     try:
         r = await c.get(url, params=params, headers=headers)
         r.raise_for_status()
+        return r.json()
     except httpx.HTTPStatusError as e:
         status = e.response.status_code if e.response else None
         body = ""
         try:
-            body = e.response.text[:500] if e.response else ""
+            body = e.response.text[:800] if e.response else ""
         except Exception:
             pass
         return {"_error": True, "status_code": status, "url": url, "body": body}
     except Exception as e:
         return {"_error": True, "status_code": None, "url": url, "body": str(e)}
 
+async def http_post_json(url: str, json_body: dict, headers: dict | None = None):
+    c = _http_client()
     try:
+        r = await c.post(url, json=json_body, headers=headers)
+        r.raise_for_status()
         return r.json()
-    except Exception:
-        txt = r.text.strip()
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response else None
+        body = ""
         try:
-            return json.loads(txt)
+            body = e.response.text[:1200] if e.response else ""
         except Exception:
-            return {"_raw_text": txt}
+            pass
+        return {"_error": True, "status_code": status, "url": url, "body": body}
+    except Exception as e:
+        return {"_error": True, "status_code": None, "url": url, "body": str(e)}
 
 def chunk_text(text: str, limit: int = 3500):
     parts, cur = [], ""
-    for line in text.splitlines(True):
+    for line in (text or "").splitlines(True):
         if len(cur) + len(line) > limit:
             parts.append(cur)
             cur = ""
@@ -153,6 +184,7 @@ def to_int_from_price_str(s: str) -> int | None:
     s2 = re.sub(r"[^\d]", "", str(s))
     return int(s2) if s2.isdigit() else None
 
+# ================= JALALI =================
 def gregorian_to_jalali(gy, gm, gd):
     g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
     if gy > 1600:
@@ -191,6 +223,68 @@ def gregorian_to_jalali(gy, gm, gd):
 
     return jy, jm, jd
 
+# ================= GEMINI CHAT =================
+def gemini_headers():
+    if not GEMINI_API_KEY:
+        return None
+    return {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+def gemini_extract_text(resp: dict) -> str | None:
+    # candidates[0].content.parts[*].text
+    parts = deep_get(resp, ["candidates", 0, "content", "parts"], [])
+    if isinstance(parts, list):
+        texts = []
+        for p in parts:
+            t = (p or {}).get("text")
+            if t:
+                texts.append(str(t))
+        out = "\n".join(texts).strip()
+        return out if out else None
+    return None
+
+async def gemini_chat(history: list[dict], user_text: str) -> str:
+    if not GEMINI_API_KEY:
+        return "❌ GEMINI_API_KEY تنظیم نشده. تو Render → Environment بذارش."
+
+    # تاریخچه رو کوتاه نگه می‌داریم (تا هزینه/توکن نترکه)
+    history = (history or [])[-12:]
+
+    contents = history + [{"role": "user", "parts": [{"text": user_text}]}]
+
+    payload = {
+        "systemInstruction": {  # طبق API reference :contentReference[oaicite:3]{index=3}
+            "parts": [{"text": "تو یک دستیار فارسیِ مودب و کوتاه‌گو هستی. پاسخ‌ها را روشن، کاربردی و خلاصه بده."}]
+        },
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 512,
+        },
+    }
+
+    data = await http_post_json(GEMINI_URL(GEMINI_MODEL), payload, headers=gemini_headers())
+
+    if isinstance(data, dict) and data.get("_error"):
+        sc = data.get("status_code")
+        body = str(data.get("body", ""))[:500]
+        if sc == 401:
+            return "❌ خطای 401: کلید Gemini اشتباهه یا دسترسی نداره."
+        if sc == 429:
+            return "⏳ الان محدودیت درخواست خوردی (429). چند لحظه بعد دوباره امتحان کن."
+        return f"❌ خطا از Gemini (HTTP {sc}): {body}"
+
+    # اگر پرامپت بلاک بشه ممکنه candidates نده و promptFeedback بیاد
+    block_reason = deep_get(data, ["promptFeedback", "blockReason"], None)
+    if block_reason and not deep_get(data, ["candidates"], None):
+        return "⚠️ درخواست به خاطر قوانین ایمنی Gemini بلاک شد. یه جور دیگه بپرس."
+
+    txt = gemini_extract_text(data)
+    return txt or "❌ پاسخی از Gemini نگرفتم. دوباره بفرست."
+
+# ================= FEATURES =================
 async def feature_fx() -> str:
     data = await http_get_json(CODEBAZAN_ARZ_URL)
     items = data.get("Result") if isinstance(data, dict) else None
@@ -295,6 +389,7 @@ async def feature_today_events() -> str:
         lines.append("\n(مناسبتی ثبت نشده)")
     return "\n".join(lines).strip()
 
+# ================= DIGIKALA =================
 def dk_extract_products(payload: dict) -> list[dict]:
     for path in (["data", "products"], ["data", "search", "products"], ["data", "items"], ["products"]):
         v = deep_get(payload, path, None)
@@ -388,9 +483,40 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ لغو شد.", reply_markup=main_keyboard)
         return
 
+    if text == "🛑 پایان چت":
+        context.user_data.pop("chat_mode", None)
+        context.user_data.pop("gemini_history", None)
+        await update.message.reply_text("✅ چت بسته شد.", reply_markup=main_keyboard)
+        return
+
+    # ===== Chat mode =====
+    if context.user_data.get("chat_mode") is True:
+        await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        history = context.user_data.get("gemini_history") or []
+        out = await gemini_chat(history, text)
+        # ذخیره تاریخچه
+        history = (history or [])[-12:]
+        history.append({"role": "user", "parts": [{"text": text}]})
+        history.append({"role": "model", "parts": [{"text": out}]})
+        context.user_data["gemini_history"] = history[-12:]
+
+        for part in chunk_text(out):
+            await update.message.reply_text(part, reply_markup=chat_keyboard)
+        return
+
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
     try:
+        # چت‌بات
+        if text == "💬 چت‌بات":
+            context.user_data["chat_mode"] = True
+            context.user_data["gemini_history"] = []
+            await update.message.reply_text(
+                "💬 چت‌بات Gemini فعال شد.\nبرای خروج: «🛑 پایان چت»",
+                reply_markup=chat_keyboard,
+            )
+            return
+
         # Digikala menu
         if text == "🛒 دیجی‌کالا":
             context.user_data["mode"] = "digikala"
@@ -474,7 +600,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Callback error")
         await q.message.reply_text("❌ خطا در صفحه‌بندی.", reply_markup=main_keyboard)
 
-
+# ================= TELEGRAM WEBHOOK =================
 application = ApplicationBuilder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
