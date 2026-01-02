@@ -32,7 +32,7 @@ import uvicorn
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# (اختیاری) اگر با سلام نیاز به API Key/Token داشت، اینجا بگذار
+# (اختیاری) اگر با سلام نیاز به توکن داشت (بسته به سرویس/سطح دسترسی)
 BASALAM_TOKEN = os.getenv("BASALAM_TOKEN", "").strip()
 
 # ================= LOG =================
@@ -80,21 +80,17 @@ HELP_TEXT = (
     "• نتایج: فقط متن + دکمه قبلی/بعدی\n\n"
     "🛍️ با سلام:\n"
     "• «🛍️ با سلام» → انتخاب دسته یا سرچ دستی\n"
-    "• نتایج: فقط متن + دکمه قبلی/بعدی\n"
+    "• نتایج: فقط متن + قبلی/بعدی\n"
 )
 
 # ================= API ENDPOINTS =================
-# Cars
 CAR_ALL_URL = "https://car.api-sina-free.workers.dev/cars?type=all"
 
-# Currency/Gold
 CODEBAZAN_ARZ_URL = "https://api.codebazan.ir/arz/?type=arz"
 CODEBAZAN_TALA_URL = "https://api.codebazan.ir/arz/?type=tala"
 
-# Crypto
 COINLORE = "https://api.coinlore.net/api/tickers/?start=0&limit=15"
 
-# Holiday
 HOLIDAY_URL = "https://holidayapi.ir/jalali/{y}/{m}/{d}"
 
 # Digikala
@@ -108,16 +104,14 @@ DIGIKALA_CATS = {
     "👕 پوشاک دیجی‌کالا": ("apparel", "پوشاک"),
 }
 
-# Basalam (⚠️ ممکنه نیاز به آپدیت بر اساس docs واقعی داشته باشه)
-# من این‌ها رو عمومی گذاشتم؛ اگر ساختار docs فرق داشت، با خطا پیام می‌ده و می‌تونیم دقیق کنیم.
+# Basalam (برای دسته‌ها از preset query استفاده می‌کنیم تا 404 نخوریم)
 BASALAM_BASE = "https://api.basalam.com"
 BS_SEARCH = f"{BASALAM_BASE}/products/search"
-BS_CATEGORY = f"{BASALAM_BASE}/categories/{{slug}}/products"
 
-BASALAM_CATS = {
-    "🍯 خوراکی با سلام": ("food", "خوراکی"),
-    "🎁 صنایع دستی با سلام": ("handicrafts", "صنایع دستی"),
-    "👕 پوشاک با سلام": ("clothing", "پوشاک"),
+BASALAM_PRESET_QUERIES = {
+    "🍯 خوراکی با سلام": "خوراکی",
+    "🎁 صنایع دستی با سلام": "صنایع دستی",
+    "👕 پوشاک با سلام": "پوشاک",
 }
 
 # ================= HTTP CLIENT =================
@@ -139,8 +133,21 @@ def _http_client() -> httpx.AsyncClient:
 
 async def http_get_json(url: str, params: dict | None = None, headers: dict | None = None):
     c = _http_client()
-    r = await c.get(url, params=params, headers=headers)
-    r.raise_for_status()
+    try:
+        r = await c.get(url, params=params, headers=headers)
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # ⛑️ جلوگیری از کرش روی 404/401
+        status = e.response.status_code if e.response else None
+        body = ""
+        try:
+            body = e.response.text[:500] if e.response else ""
+        except Exception:
+            pass
+        return {"_error": True, "status_code": status, "url": url, "body": body}
+    except Exception as e:
+        return {"_error": True, "status_code": None, "url": url, "body": str(e)}
+
     try:
         return r.json()
     except Exception:
@@ -221,12 +228,8 @@ async def feature_fx() -> str:
     items = data.get("Result") if isinstance(data, dict) else None
     if not items:
         return "💵 الان نتونستم قیمت ارز رو بگیرم."
-    priority = {"دلار", "یورو", "پوند انگلیس", "درهم امارات", "لیر ترکیه", "دلار کانادا"}
-    first = [x for x in items if (x.get("name") or "").strip() in priority]
-    rest = [x for x in items if x not in first]
-    show = first + rest[:25]
     lines = ["💵 قیمت ارز (منتخب)\n"]
-    for it in show:
+    for it in items[:30]:
         name = (it.get("name") or "").strip()
         price = (it.get("price") or "").strip()
         if name and price:
@@ -261,8 +264,6 @@ async def feature_crypto() -> str:
         return "₿ الان نتونستم قیمت ارز دیجیتال رو بگیرم."
     usd_toman = await get_usd_toman_rate()
     lines = ["₿ ارز دیجیتال (۱۵ کوین اول)\n"]
-    if usd_toman:
-        lines.append(f"نرخ دلار مبنا (تقریبی): {usd_toman:,} تومان\n")
     for c in coins[:15]:
         name = c.get("name") or c.get("symbol") or "?"
         symbol = (c.get("symbol") or "").upper()
@@ -297,11 +298,14 @@ async def feature_today_events() -> str:
     jy, jm, jd = gregorian_to_jalali(now.year, now.month, now.day)
     url = HOLIDAY_URL.format(y=jy, m=jm, d=jd)
     data = await http_get_json(url)
-    if not isinstance(data, dict):
+
+    if isinstance(data, dict) and data.get("_error"):
         return "📅 الان نتونستم مناسبت امروز رو بگیرم."
+
     date_text = data.get("date") or f"{jy}/{jm:02d}/{jd:02d}"
     is_holiday = data.get("is_holiday")
     events = data.get("events") or []
+
     lines = [f"📅 مناسبت‌های امروز ({date_text})"]
     if is_holiday is True:
         lines.append("✅ امروز تعطیل رسمی است.")
@@ -348,6 +352,9 @@ def dk_price_text(prod: dict) -> str:
 
 async def dk_search(query: str, page: int = 1):
     payload = await http_get_json(DK_SEARCH, params={"q": query, "page": page})
+    if isinstance(payload, dict) and payload.get("_error"):
+        return "🛒 دیجی‌کالا الان پاسخ نداد.", None
+
     prods = dk_extract_products(payload)
     if not prods:
         return f"🛒 نتیجه‌ای برای «{query}» پیدا نشد.", None
@@ -368,6 +375,9 @@ async def dk_search(query: str, page: int = 1):
 async def dk_category(slug: str, title_fa: str, page: int = 1):
     url = DK_CATEGORY.format(slug=slug)
     payload = await http_get_json(url, params={"page": page})
+    if isinstance(payload, dict) and payload.get("_error"):
+        return "🛒 دیجی‌کالا الان پاسخ نداد.", None
+
     prods = dk_extract_products(payload)
     if not prods:
         return f"🛒 دیجی‌کالا | {title_fa}\nنتیجه‌ای پیدا نشد.", None
@@ -387,7 +397,6 @@ async def dk_category(slug: str, title_fa: str, page: int = 1):
 
 # ================= BASALAM =================
 def bs_headers():
-    # اگر BASALAM_TOKEN نداری، خالی برمی‌گرده و درخواست عمومی می‌ره
     if BASALAM_TOKEN:
         return {"Authorization": f"Bearer {BASALAM_TOKEN}"}
     return {}
@@ -398,7 +407,6 @@ def bs_extract_products(payload: dict) -> list[dict]:
             v = payload.get(k)
             if isinstance(v, list):
                 return v
-        # بعضی وقت‌ها data خودش dictه
         data = payload.get("data")
         if isinstance(data, dict):
             for k in ("items", "results", "products"):
@@ -408,11 +416,14 @@ def bs_extract_products(payload: dict) -> list[dict]:
     return []
 
 async def bs_search(query: str, page: int = 1):
-    # اگر endpoint docs فرق داشت، اینجا فقط خطا می‌ده و پیام مناسب می‌فرستیم
     payload = await http_get_json(BS_SEARCH, params={"q": query, "page": page}, headers=bs_headers())
+    if isinstance(payload, dict) and payload.get("_error"):
+        sc = payload.get("status_code")
+        return f"🛍️ با سلام الان پاسخ نداد (HTTP {sc}).", None
+
     prods = bs_extract_products(payload)
     if not prods:
-        return f"🛍️ با سلام | برای «{query}» نتیجه‌ای نیومد یا API پاسخ نداد.", None
+        return f"🛍️ با سلام | برای «{query}» نتیجه‌ای نیومد.", None
 
     lines = [f"🛍️ با سلام | جستجو: «{query}» | صفحه {page}\n"]
     for p in prods[:12]:
@@ -424,26 +435,6 @@ async def bs_search(query: str, page: int = 1):
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"bss_{page-1}"))
     nav.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"bss_{page+1}"))
-    markup = InlineKeyboardMarkup([nav])
-    return "\n".join(lines).strip(), markup
-
-async def bs_category(slug: str, title_fa: str, page: int = 1):
-    url = BS_CATEGORY.format(slug=slug)
-    payload = await http_get_json(url, params={"page": page}, headers=bs_headers())
-    prods = bs_extract_products(payload)
-    if not prods:
-        return f"🛍️ با سلام | دسته {title_fa}\nنتیجه‌ای نیومد یا API پاسخ نداد.", None
-
-    lines = [f"🛍️ با سلام | دسته: {title_fa} | صفحه {page}\n"]
-    for p in prods[:12]:
-        title = p.get("title") or p.get("name") or p.get("product_name") or "بدون عنوان"
-        price = p.get("price") or p.get("final_price") or p.get("amount") or "—"
-        lines.append(f"• {str(title).strip()}\n  💰 {price}\n")
-
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"bsc_{slug}_{page-1}"))
-    nav.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"bsc_{slug}_{page+1}"))
     markup = InlineKeyboardMarkup([nav])
     return "\n".join(lines).strip(), markup
 
@@ -483,14 +474,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("awaiting", None)
             context.user_data["dk_last_query"] = text
             msg, markup = await dk_search(text, page=1)
-            await update.message.reply_text(msg, reply_markup=markup)
+            await update.message.reply_text(msg, reply_markup=markup or digikala_menu_keyboard)
             return
 
         if text in DIGIKALA_CATS:
             slug, fa_title = DIGIKALA_CATS[text]
             context.user_data["dk_last_cat"] = (slug, fa_title)
             msg, markup = await dk_category(slug, fa_title, page=1)
-            await update.message.reply_text(msg, reply_markup=markup)
+            await update.message.reply_text(msg, reply_markup=markup or digikala_menu_keyboard)
             return
 
         # ---- basalam flow ----
@@ -510,14 +501,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("awaiting", None)
             context.user_data["bs_last_query"] = text
             msg, markup = await bs_search(text, page=1)
-            await update.message.reply_text(msg, reply_markup=markup)
+            await update.message.reply_text(msg, reply_markup=markup or basalam_menu_keyboard)
             return
 
-        if text in BASALAM_CATS:
-            slug, fa_title = BASALAM_CATS[text]
-            context.user_data["bs_last_cat"] = (slug, fa_title)
-            msg, markup = await bs_category(slug, fa_title, page=1)
-            await update.message.reply_text(msg, reply_markup=markup)
+        # ✅ دسته‌های با سلام = preset query (بدون endpoint دسته‌بندی → بدون 404)
+        if text in BASALAM_PRESET_QUERIES:
+            q = BASALAM_PRESET_QUERIES[text]
+            context.user_data["bs_last_query"] = q
+            msg, markup = await bs_search(q, page=1)
+            await update.message.reply_text(msg, reply_markup=markup or basalam_menu_keyboard)
             return
 
         # ---- back/cancel ----
@@ -568,7 +560,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text("اول سرچ دستی دیجی‌کالا رو انجام بده.", reply_markup=digikala_menu_keyboard)
                 return
             msg, markup = await dk_search(last_q, page=page)
-            await q.message.reply_text(msg, reply_markup=markup)
+            await q.message.reply_text(msg, reply_markup=markup or digikala_menu_keyboard)
             return
 
         # Digikala category pagination
@@ -578,7 +570,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last = context.user_data.get("dk_last_cat")
             fa_title = last[1] if last else slug
             msg, markup = await dk_category(slug, fa_title, page=page)
-            await q.message.reply_text(msg, reply_markup=markup)
+            await q.message.reply_text(msg, reply_markup=markup or digikala_menu_keyboard)
             return
 
         # Basalam search pagination
@@ -589,17 +581,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text("اول سرچ دستی با سلام رو انجام بده.", reply_markup=basalam_menu_keyboard)
                 return
             msg, markup = await bs_search(last_q, page=page)
-            await q.message.reply_text(msg, reply_markup=markup)
-            return
-
-        # Basalam category pagination
-        if data.startswith("bsc_"):
-            _, slug, page_s = data.split("_", 2)
-            page = int(page_s)
-            last = context.user_data.get("bs_last_cat")
-            fa_title = last[1] if last else slug
-            msg, markup = await bs_category(slug, fa_title, page=page)
-            await q.message.reply_text(msg, reply_markup=markup)
+            await q.message.reply_text(msg, reply_markup=markup or basalam_menu_keyboard)
             return
 
         await q.message.reply_text("❌ دکمه نامعتبر", reply_markup=main_keyboard)
@@ -608,11 +590,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Callback error")
         await q.message.reply_text("❌ خطا در صفحه‌بندی.", reply_markup=main_keyboard)
 
-
+# ================= TELEGRAM WEBHOOK =================
 application = ApplicationBuilder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
-application.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(dks_|dkc_|bss_|bsc_)"))
+application.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(dks_|dkc_|bss_)"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 async def telegram_webhook(request: Request):
