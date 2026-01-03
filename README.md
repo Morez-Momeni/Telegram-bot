@@ -5,12 +5,10 @@ A clean, multi-purpose Telegram bot (Persian-first) featuring **prices, holidays
 <p>
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" />
   <img src="https://img.shields.io/badge/Telegram-Bot-26A5E4" />
-  <img src="https://img.shields.io/badge/Deploy-Render-8A2BE2" />
-  <img src="https://img.shields.io/badge/Webhook-Starlette%20%2B%20Uvicorn-2E8B57" />
   <img src="https://img.shields.io/badge/LLM-Gemini-FF6F00" />
 </p>
 
-**Telegram Bot:** `@youarebestbot`  
+
 
 
 ---
@@ -45,9 +43,6 @@ A clean, multi-purpose Telegram bot (Persian-first) featuring **prices, holidays
 - `httpx` (async API calls)
 - Google Gemini (optional chatbot)
 
----
-## Try it
-**Telegram Bot:** https://t.me/youarebestbot
 
 ---
 
